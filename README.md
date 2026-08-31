@@ -75,7 +75,7 @@ No secret is ever committed or shipped to the browser (spec FR8).
 ## Phase status
 
 - [x] Phase 0 — live skeleton (backend + frontend + Postgres + migrations + CORS)
-- [ ] Phase 1 — data model + external ingestion
+- [x] Phase 1 — data model + external ingestion (schema migration; TMDb + Open Library clients; normalization)
 - [ ] Phase 2 — library CRUD + UI
 - [ ] Phase 3 — taste profile
 - [ ] Phase 4 — single-turn recommendations (MVP deploy checkpoint)
