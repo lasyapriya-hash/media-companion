@@ -35,7 +35,12 @@ createdb media_companion        # once
 
 - Health check: <http://localhost:8000/health>
 - API docs: <http://localhost:8000/docs>
-- Tests: `.venv/bin/pytest`
+- Tests: `.venv/bin/pytest` (unit + API). Live external-API smoke: `.venv/bin/pytest -m integration`
+  (TMDb tests skip unless `TMDB_API_KEY` is set in `backend/.env`).
+- Needs local databases `media_companion` and `media_companion_test`
+  (`createdb media_companion media_companion_test`).
+- Backfill mood tags once `ANTHROPIC_API_KEY` is set:
+  `.venv/bin/python -m app.scripts.backfill_mood_tags`
 
 ### Frontend
 
@@ -46,8 +51,9 @@ cp .env.example .env.local      # NEXT_PUBLIC_API_BASE_URL defaults to localhost
 npm run dev
 ```
 
-Open <http://localhost:3000>. The home page shows the live backend health
-status.
+Open <http://localhost:3000>: **Library** (browse/filter), **Search & add**
+(discover and add items), and an item page for status / rating / review /
+favourite and, for series, season/episode progress.
 
 ## Deployment (split topology, spec §15 D2)
 
@@ -65,9 +71,10 @@ status.
 | Backend | `DATABASE_URL` | Postgres connection string |
 | Backend | `ENV` | `production` in deploys |
 | Backend | `FRONTEND_ORIGIN` | allowed CORS origin(s), comma-separated |
-| Backend | `TMDB_API_KEY` | TMDb v3 API key (Phase 1) |
+| Backend | `TMDB_API_KEY` | TMDb v3 API key (movie/series search) |
 | Backend | `GOOGLE_BOOKS_API_KEY` | optional; Google Books fallback (Phase 6) |
-| Backend | `ANTHROPIC_API_KEY` | Claude API (Phase 4) |
+| Backend | `ANTHROPIC_API_KEY` | optional; enables mood_tags on add. Not required for library use. |
+| Backend | `MOOD_TAGS_MODEL` | optional; overrides the mood-tag classification model |
 | Frontend | `NEXT_PUBLIC_API_BASE_URL` | backend base URL |
 
 No secret is ever committed or shipped to the browser (spec FR8).
@@ -76,7 +83,7 @@ No secret is ever committed or shipped to the browser (spec FR8).
 
 - [x] Phase 0 — live skeleton (backend + frontend + Postgres + migrations + CORS)
 - [x] Phase 1 — data model + external ingestion (schema migration; TMDb + Open Library clients; normalization)
-- [ ] Phase 2 — library CRUD + UI
+- [x] Phase 2 — library CRUD + UI (search/library endpoints; add + status/rating/review/favourite + series progress; mood_tags feature-gated on ANTHROPIC_API_KEY with backfill script)
 - [ ] Phase 3 — taste profile
 - [ ] Phase 4 — single-turn recommendations (MVP deploy checkpoint)
 - [ ] Phase 5 — clarification turn

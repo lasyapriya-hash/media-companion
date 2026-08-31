@@ -60,3 +60,16 @@ class MediaItem(Base):
     fetched_at: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
     )
+
+    @property
+    def length_bucket(self) -> str | None:
+        """Derived per spec §6.4 — not stored (see spec §6.1)."""
+        from app.services.normalization import length_bucket as _bucket
+
+        result = _bucket(
+            self.type.value if hasattr(self.type, "value") else self.type,
+            runtime_minutes=self.runtime_minutes,
+            episode_runtime_minutes=self.episode_runtime_minutes,
+            page_count=self.page_count,
+        )
+        return result.value if result is not None else None

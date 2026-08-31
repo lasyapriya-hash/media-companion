@@ -8,6 +8,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
 from app.models.enums import LibraryStatus, enum_values
+from app.models.media import MediaItem
 
 
 class LibraryEntry(Base):
@@ -50,8 +51,9 @@ class LibraryEntry(Base):
         onupdate=sa.func.now(),
     )
 
+    media: Mapped[MediaItem] = relationship(lazy="joined")
     progress: Mapped["SeriesProgress | None"] = relationship(
-        back_populates="entry", cascade="all, delete-orphan", uselist=False
+        back_populates="entry", cascade="all, delete-orphan", uselist=False, lazy="joined"
     )
 
 

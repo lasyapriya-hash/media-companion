@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import Link from "next/link";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -20,7 +21,16 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
-        <div className="container">{children}</div>
+        <div className="container">
+          <nav className="site-nav">
+            <Link href="/" className="brand">
+              Media Companion
+            </Link>
+            <Link href="/">Library</Link>
+            <Link href="/search">Search &amp; add</Link>
+          </nav>
+          {children}
+        </div>
       </body>
     </html>
   );

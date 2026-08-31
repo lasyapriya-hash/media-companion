@@ -1,83 +1,139 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { API_BASE_URL, getHealth, type HealthResponse } from "@/lib/api";
+import Link from "next/link";
+import { useCallback, useEffect, useState } from "react";
+import {
+  listLibrary,
+  STATUS_LABELS,
+  type LibraryEntryOut,
+  type LibraryStatus,
+  type MediaType,
+} from "@/lib/api";
 
-type State =
-  | { kind: "loading" }
-  | { kind: "ok"; data: HealthResponse }
-  | { kind: "error"; message: string };
+const STATUSES: LibraryStatus[] = [
+  "want",
+  "in_progress",
+  "completed",
+  "dropped",
+];
+const TYPES: MediaType[] = ["movie", "series", "book"];
 
-export default function HomePage() {
-  const [state, setState] = useState<State>({ kind: "loading" });
+export default function LibraryPage() {
+  const [entries, setEntries] = useState<LibraryEntryOut[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<LibraryStatus | "">("");
+  const [typeFilter, setTypeFilter] = useState<MediaType | "">("");
+
+  const load = useCallback(() => {
+    setError(null);
+    setEntries(null);
+    listLibrary({
+      status: statusFilter || undefined,
+      type: typeFilter || undefined,
+    })
+      .then(setEntries)
+      .catch((e: unknown) =>
+        setError(e instanceof Error ? e.message : String(e)),
+      );
+  }, [statusFilter, typeFilter]);
 
   useEffect(() => {
-    let cancelled = false;
-    getHealth()
-      .then((data) => {
-        if (!cancelled) setState({ kind: "ok", data });
-      })
-      .catch((err: unknown) => {
-        if (!cancelled)
-          setState({
-            kind: "error",
-            message: err instanceof Error ? err.message : String(err),
-          });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    load();
+  }, [load]);
 
   return (
     <main>
-      <h1>Personal Media Companion</h1>
-      <p className="muted">
-        One library for movies, series, and books &mdash; with natural-language
-        recommendations.
-      </p>
+      <h1>Your library</h1>
 
-      <section className="panel" style={{ marginTop: "1.5rem" }}>
-        <h2 style={{ marginTop: 0, fontSize: "1.05rem" }}>Backend connection</h2>
-        <p className="muted" style={{ marginTop: 0 }}>
-          API base: <code>{API_BASE_URL}</code>
-        </p>
+      <div className="row" style={{ margin: "1rem 0 1.5rem" }}>
+        <label className="muted">
+          Status{" "}
+          <select
+            value={statusFilter}
+            onChange={(e) =>
+              setStatusFilter(e.target.value as LibraryStatus | "")
+            }
+          >
+            <option value="">All</option>
+            {STATUSES.map((s) => (
+              <option key={s} value={s}>
+                {STATUS_LABELS[s]}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="muted">
+          Type{" "}
+          <select
+            value={typeFilter}
+            onChange={(e) => setTypeFilter(e.target.value as MediaType | "")}
+          >
+            <option value="">All</option>
+            {TYPES.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
 
-        {state.kind === "loading" && <p>Checking&hellip;</p>}
+      {error && <div className="error-box">{error}</div>}
 
-        {state.kind === "ok" && (
-          <ul style={{ margin: 0, paddingLeft: "1.2rem" }}>
-            <li>
-              Status:{" "}
-              <span className="status-ok">{state.data.status}</span>
-            </li>
-            <li>
-              Database:{" "}
-              <span
-                className={
-                  state.data.database === "connected"
-                    ? "status-ok"
-                    : "status-err"
+      {!entries && !error && <p className="muted">Loading&hellip;</p>}
+
+      {entries && entries.length === 0 && (
+        <div className="panel">
+          <p style={{ marginTop: 0 }}>Nothing here yet.</p>
+          <Link href="/search">Search for something to add &rarr;</Link>
+        </div>
+      )}
+
+      {entries && entries.length > 0 && (
+        <div className="card-grid">
+          {entries.map((entry) => (
+            <Link
+              key={entry.id}
+              href={`/item/${entry.id}`}
+              className="media-card"
+              style={{ color: "inherit" }}
+            >
+              <div
+                className="thumb"
+                style={
+                  entry.media.artwork_url
+                    ? { backgroundImage: `url(${entry.media.artwork_url})` }
+                    : undefined
                 }
-              >
-                {state.data.database}
-              </span>
-            </li>
-            <li className="muted">Environment: {state.data.env}</li>
-          </ul>
-        )}
-
-        {state.kind === "error" && (
-          <p className="status-err">
-            Could not reach the backend: {state.message}
-          </p>
-        )}
-      </section>
-
-      <p className="muted" style={{ marginTop: "2rem", fontSize: "0.9rem" }}>
-        Phase 0 skeleton. Library, discovery, and recommendations arrive in
-        later phases.
-      </p>
+              />
+              <div className="body">
+                <span className="title">
+                  {entry.media.title}
+                  {entry.favourite ? " ★" : ""}
+                </span>
+                <div className="chips">
+                  <span className="badge">{entry.media.type}</span>
+                  {entry.media.year && (
+                    <span className="badge">{entry.media.year}</span>
+                  )}
+                  <span className="badge">
+                    {STATUS_LABELS[entry.status]}
+                  </span>
+                </div>
+                {entry.rating != null && (
+                  <span className="muted">Your rating: {entry.rating}/10</span>
+                )}
+                {entry.media.type === "series" && entry.progress && (
+                  <span className="muted">
+                    {entry.progress.seasons_completed} season
+                    {entry.progress.seasons_completed === 1 ? "" : "s"} done
+                  </span>
+                )}
+              </div>
+            </Link>
+          ))}
+        </div>
+      )}
     </main>
   );
 }

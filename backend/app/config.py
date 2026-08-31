@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     # no key for basic search; kept here for the Phase 6 fallback.
     google_books_api_key: str = ""
     anthropic_api_key: str = ""
+    # Model for the bounded mood-tag classification call (spec §6.4). Optional
+    # override; blank falls back to the service default.
+    mood_tags_model: str = ""
 
     @field_validator("database_url")
     @classmethod
