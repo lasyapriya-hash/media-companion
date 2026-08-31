@@ -1,0 +1,11 @@
+Alembic migrations for the Personal Media Companion backend.
+
+Common commands (run from backend/, with the venv active and DATABASE_URL set):
+
+  alembic upgrade head              # apply all migrations
+  alembic revision --autogenerate -m "message"
+  alembic downgrade -1              # roll back one
+  alembic current                  # show applied revision
+
+The deploy hook runs `alembic upgrade head` before starting the app
+(see start.sh).

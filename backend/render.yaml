@@ -1,0 +1,32 @@
+# Render blueprint: Postgres + FastAPI backend.
+# Create via Render dashboard -> "New" -> "Blueprint" pointed at this repo.
+# The frontend is deployed separately on Vercel (spec §15 D2).
+services:
+  - type: web
+    name: media-companion-api
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: ./start.sh
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: media-companion-db
+          property: connectionString
+      - key: ENV
+        value: production
+      - key: FRONTEND_ORIGIN
+        sync: false   # set to the deployed Vercel URL
+      - key: TMDB_API_KEY
+        sync: false
+      - key: GOOGLE_BOOKS_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+
+databases:
+  - name: media-companion-db
+    plan: free
+    postgresMajorVersion: "16"
