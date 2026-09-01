@@ -20,27 +20,39 @@ logger = logging.getLogger("uvicorn.error")
 _DISABLED = {"", "none", "off", "disabled", "false"}
 
 
-def get_extractor() -> PreferenceExtractor | None:
-    """The configured extractor, or ``None`` when the LLM is disabled/unavailable.
+def gemini_target() -> tuple[str, str] | None:
+    """`(api_key, model)` when Gemini is configured, else ``None``.
 
-    ``None`` is the signal to the orchestrator to use `parse_preferences`.
+    The single source of truth for "is the LLM provider available?" — shared by
+    the preference extractor (spec §7) and the `mood_tags` classifier (spec
+    §6.4). Anthropic is not referenced anywhere.
     """
     settings = get_settings()
     provider = (settings.llm_provider or "").strip().lower()
     if provider in _DISABLED:
         return None
-    if provider == "gemini":
-        if not settings.gemini_api_key:
-            logger.info("LLM_PROVIDER=gemini but GEMINI_API_KEY is unset; using fallback")
-            return None
-        from app.services.llm.gemini import GeminiExtractor
+    if provider != "gemini":
+        logger.warning("unknown LLM_PROVIDER %r; LLM features disabled", provider)
+        return None
+    if not settings.gemini_api_key:
+        return None
+    from app.services.llm.gemini import DEFAULT_MODEL
 
-        return GeminiExtractor(
-            api_key=settings.gemini_api_key,
-            model=settings.gemini_model or None,
-        )
-    logger.warning("unknown LLM_PROVIDER %r; using deterministic fallback", provider)
-    return None
+    return settings.gemini_api_key, (settings.gemini_model or DEFAULT_MODEL)
 
 
-__all__ = ["PreferenceExtractor", "get_extractor", "parse_preferences"]
+def get_extractor() -> PreferenceExtractor | None:
+    """The configured extractor, or ``None`` when the LLM is disabled/unavailable.
+
+    ``None`` is the signal to the orchestrator to use `parse_preferences`.
+    """
+    target = gemini_target()
+    if target is None:
+        return None
+    from app.services.llm.gemini import GeminiExtractor
+
+    api_key, model = target
+    return GeminiExtractor(api_key=api_key, model=model)
+
+
+__all__ = ["PreferenceExtractor", "gemini_target", "get_extractor", "parse_preferences"]

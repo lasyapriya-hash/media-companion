@@ -9,7 +9,7 @@ from __future__ import annotations
 import datetime as _dt
 import logging
 
-from app.clients import openlibrary_client, tmdb_client
+from app.clients import google_books_client, openlibrary_client, tmdb_client
 from app.models.taste import TasteProfile
 from app.schemas.media import NormalizedMedia
 from app.schemas.preference import PreferenceObject, ReleaseWindow
@@ -20,6 +20,35 @@ logger = logging.getLogger("uvicorn.error")
 SCREEN_TYPES = ("movie", "series")
 _RECENT_SPAN_YEARS = 6
 _CLASSIC_UNTIL_YEAR = 2000
+
+
+def _discover_books(
+    subjects: list[str] | None, ol_lang: str | None, limit: int
+) -> tuple[list[NormalizedMedia], bool]:
+    """Open Library first, Google Books fallback on empty/error (spec §15 D1).
+
+    Returns (items, failed) — `failed` is True only when *both* sources errored.
+    """
+    try:
+        items = openlibrary_client().discover(
+            subjects=subjects, language=ol_lang, limit=limit
+        )
+        if items:
+            return items, False
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Open Library discover failed: %s", exc)
+        try:
+            return google_books_client().discover(subjects=subjects, limit=limit), False
+        except Exception as exc2:  # noqa: BLE001
+            logger.warning("Google Books discover failed: %s", exc2)
+            return [], True
+
+    # Open Library succeeded but returned nothing -> widen with Google Books.
+    try:
+        return google_books_client().discover(subjects=subjects, limit=limit), False
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Google Books discover failed: %s", exc)
+        return [], False
 
 
 def period_years(period: object) -> tuple[int | None, int | None]:
@@ -95,13 +124,10 @@ def build_candidates(
                     logger.warning("TMDb discover (%s) failed: %s", media_type, exc)
         else:
             attempts += 1
-            try:
-                items += openlibrary_client().discover(
-                    subjects=book_subjects, language=ol_lang, limit=25
-                )
-            except Exception as exc:  # noqa: BLE001
+            book_items, failed = _discover_books(book_subjects, ol_lang, 25)
+            items += book_items
+            if failed:
                 failures += 1
-                logger.warning("Open Library discover failed: %s", exc)
 
     all_failed = attempts > 0 and failures == attempts
     return _dedupe(items), all_failed
@@ -111,11 +137,11 @@ def broad_candidates(prefs: PreferenceObject) -> list[NormalizedMedia]:
     """Last-resort unfiltered pull so `ranking` still yields a list (spec §8.2)."""
     items: list[NormalizedMedia] = []
     for media_type in _target_types(prefs):
-        try:
-            if media_type in SCREEN_TYPES:
+        if media_type in SCREEN_TYPES:
+            try:
                 items += tmdb_client().discover(media_type, limit=20)
-            else:
-                items += openlibrary_client().discover(subjects=None, limit=20)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("broad discover (%s) failed: %s", media_type, exc)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("broad discover (%s) failed: %s", media_type, exc)
+        else:
+            items += _discover_books(None, None, 20)[0]
     return _dedupe(items)

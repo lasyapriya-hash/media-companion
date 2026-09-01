@@ -1,8 +1,8 @@
-"""Shared HTTP plumbing for external API clients.
+"""Shared HTTP plumbing for external API clients (spec §3.4 / NFR2).
 
-Timeout + one retry on transient network errors (spec §3.4 / NFR2). Richer
-fallback handling (typed "unknown" states, primary/fallback book APIs) lands in
-later phases; this is the transport floor.
+Every request: a bounded timeout, one retry on a transient failure (network
+error, 429, or 5xx), then a typed `ExternalAPIError` the caller can catch and
+turn into a graceful fallback. Non-transient 4xx errors are not retried.
 """
 from __future__ import annotations
 
@@ -18,13 +18,20 @@ DEFAULT_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 
 
 class ExternalAPIError(RuntimeError):
-    """Raised when an upstream API call ultimately fails."""
+    """An upstream API call ultimately failed (after any retry)."""
+
+
+class TransientAPIError(ExternalAPIError):
+    """A retryable upstream failure: 429 or 5xx."""
+
+
+_RETRYABLE = (httpx.TimeoutException, httpx.TransportError, TransientAPIError)
 
 
 @retry(
     stop=stop_after_attempt(2),
     wait=wait_fixed(0.4),
-    retry=retry_if_exception_type((httpx.TimeoutException, httpx.TransportError)),
+    retry=retry_if_exception_type(_RETRYABLE),
     reraise=True,
 )
 def request_json(
@@ -35,16 +42,18 @@ def request_json(
 ) -> dict:
     """GET `path` on an existing client and return parsed JSON.
 
-    Retries once on timeout/transport errors; raises ExternalAPIError on an
-    HTTP error status or a non-JSON body.
+    Retries once on a transient failure; raises `ExternalAPIError`
+    (`TransientAPIError` for 429/5xx) on failure or a non-JSON body.
     """
     try:
         resp = http.get(path, params=params, headers=headers)
         resp.raise_for_status()
         return resp.json()
     except httpx.HTTPStatusError as exc:
-        raise ExternalAPIError(
-            f"{exc.request.url} -> HTTP {exc.response.status_code}"
-        ) from exc
+        status = exc.response.status_code
+        message = f"{exc.request.url} -> HTTP {status}"
+        if status == 429 or 500 <= status < 600:
+            raise TransientAPIError(message) from exc
+        raise ExternalAPIError(message) from exc
     except ValueError as exc:  # invalid JSON
         raise ExternalAPIError(f"{path} -> invalid JSON response") from exc

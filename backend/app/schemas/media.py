@@ -2,6 +2,7 @@
 (spec §5.2, §6.1). These are transport/DTO models, not database rows.
 """
 import enum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -45,10 +46,14 @@ class NormalizedMedia(BaseModel):
 
 
 class WatchAvailability(BaseModel):
-    """TMDb watch-provider summary for one region (spec §5.4)."""
+    """TMDb watch-provider summary for one region (spec §5.4).
+
+    `status` is always exactly `"available"` or `"unknown"` — never an error or
+    a blank; the frontend renders "availability unknown" for the latter.
+    """
 
     region: str = "IN"
-    status: str  # "available" | "unknown"
+    status: Literal["available", "unknown"]
     flatrate: list[str] = Field(default_factory=list)
     rent: list[str] = Field(default_factory=list)
     buy: list[str] = Field(default_factory=list)

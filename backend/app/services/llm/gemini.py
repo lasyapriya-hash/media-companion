@@ -1,8 +1,13 @@
-"""Google Gemini implementation of `PreferenceExtractor` (spec §10, §15 D7).
+"""Google Gemini bindings — the only LLM provider (spec §10, §15 D6/D7).
 
-One bounded call: JSON-only response, low token cap, `temperature=0`, a single
-short timeout, at most one retry. No tools, no multi-turn, no agent loop. Any
-failure returns ``None`` so the caller falls back to the deterministic parser.
+Two bounded call types, each JSON-only, low token cap, `temperature=0`, one
+short timeout, at most one retry, no tools / multi-turn / agent loop:
+
+* `GeminiExtractor` — free text -> structured preference object (spec §7).
+* `GeminiMoodClassifier` — synopsis + genres -> `mood_tags` subset (spec §6.4).
+
+Both are optional: any failure is swallowed by the caller (deterministic
+fallback for extraction; empty tags for mood). No Anthropic dependency.
 """
 from __future__ import annotations
 
@@ -131,6 +136,9 @@ class GeminiExtractor:
                 max_output_tokens=_MAX_OUTPUT_TOKENS,
                 response_mime_type="application/json",
                 response_schema=_RESPONSE_SCHEMA,
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                    disable=True
+                ),
             ),
         )
         return (resp.text or "").strip()
@@ -154,3 +162,43 @@ class GeminiExtractor:
                 logger.warning("Gemini extraction attempt %d failed: %s", attempt, exc)
         logger.warning("Gemini extraction giving up, using fallback: %s", last_exc)
         return None
+
+
+# --------------------------------------------------------------------------- #
+# Mood-tag classification (spec §6.4) — the second bounded call type
+# --------------------------------------------------------------------------- #
+_MOOD_MAX_OUTPUT_TOKENS = 120
+_MOOD_SCHEMA: dict = {
+    "type": "array",
+    "items": {"type": "string", "enum": list(MOOD_TAG_VOCABULARY)},
+}
+
+
+class GeminiMoodClassifier:
+    def __init__(self, *, api_key: str, model: str | None = None) -> None:
+        self._api_key = api_key
+        self._model = model or DEFAULT_MODEL
+
+    def classify(self, prompt: str) -> str:
+        """Return the raw JSON string; the caller coerces to known tags."""
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(
+            api_key=self._api_key,
+            http_options=types.HttpOptions(timeout=_TIMEOUT_MS),
+        )
+        resp = client.models.generate_content(
+            model=self._model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+                max_output_tokens=_MOOD_MAX_OUTPUT_TOKENS,
+                response_mime_type="application/json",
+                response_schema=_MOOD_SCHEMA,
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                    disable=True
+                ),
+            ),
+        )
+        return (resp.text or "").strip()

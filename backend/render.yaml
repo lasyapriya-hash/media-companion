@@ -21,12 +21,11 @@ services:
         sync: false   # set to the deployed Vercel URL
       - key: TMDB_API_KEY
         sync: false
-      - key: GOOGLE_BOOKS_API_KEY
+      - key: GOOGLE_BOOKS_API_KEY   # optional — Open Library is primary (spec §15 D1)
         sync: false
-      - key: ANTHROPIC_API_KEY
-        sync: false
-      # LLM for preference extraction (spec §10). Optional: the deterministic
-      # fallback runs when unset. "gemini" or "none".
+      # LLM provider (spec §10, §15 D6/D7). Optional: preference extraction falls
+      # back to a deterministic parser and mood-tag classification is skipped
+      # when unset. "gemini" or "none". No Anthropic dependency.
       - key: LLM_PROVIDER
         value: gemini
       - key: GEMINI_API_KEY

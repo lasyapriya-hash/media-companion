@@ -1,6 +1,6 @@
 """Backfill mood_tags for media items added while the classifier was disabled.
 
-Usage (from backend/, venv active, ANTHROPIC_API_KEY set):
+Usage (from backend/, venv active, an LLM provider configured — GEMINI_API_KEY):
     python -m app.scripts.backfill_mood_tags [--limit N] [--dry-run]
 """
 from __future__ import annotations
@@ -17,7 +17,7 @@ from app.services import mood_tags
 
 def backfill(limit: int | None = None, dry_run: bool = False) -> int:
     if not mood_tags.is_enabled():
-        print("ANTHROPIC_API_KEY is not set — nothing to do.", file=sys.stderr)
+        print("No LLM provider configured (GEMINI_API_KEY) — nothing to do.", file=sys.stderr)
         return 0
 
     updated = 0

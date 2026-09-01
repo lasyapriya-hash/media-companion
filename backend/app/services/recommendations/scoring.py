@@ -9,7 +9,6 @@ No LLM anywhere in this module.
 """
 from __future__ import annotations
 
-import datetime as _dt
 from dataclasses import dataclass, field
 
 from app.models.taste import TasteProfile
@@ -18,7 +17,6 @@ from app.schemas.preference import PreferenceObject, ReleaseWindow
 from app.services.recommendations.candidates import period_years
 from app.services.vocab import (
     GENRE_SYNONYMS,
-    INTENSITY_WORDS,
     MOOD_SYNONYMS,
     MOOD_TONE_GENRE_HINTS,
     TONE_SYNONYMS,
@@ -238,11 +236,29 @@ def _taste_profile_match(item: NormalizedMedia, taste: TasteProfile, exp: MatchE
 
 
 def _penalty(item: NormalizedMedia, taste: TasteProfile) -> float:
-    drop = {d.lower() for d in (taste.drop_patterns or [])}
-    if not drop:
+    """Deductions for `drop_patterns` and low per-genre completion (spec §9.1).
+
+    A confirmed drop-pattern genre is penalised hardest, scaled by how far its
+    completion rate sits below 1.0; a genre that merely completes poorly
+    (< 50%) without being a full pattern gets a small nudge. Capped at 0.35.
+    """
+    cand = _cand_genres(item)
+    if not cand:
         return 0.0
-    hits = len(_cand_genres(item) & drop)
-    return min(0.30, 0.10 * hits)
+    drop = {d.lower() for d in (taste.drop_patterns or [])}
+    by_genre = {
+        k.lower(): float(v)
+        for k, v in (taste.completion_rate_by_genre or {}).items()
+    }
+
+    pen = 0.0
+    for g in cand:
+        if g in drop:
+            rate = _clamp(by_genre.get(g, 0.0))
+            pen += 0.12 + 0.12 * (1.0 - rate)  # 0.12–0.24 per drop-pattern genre
+        elif g in by_genre and by_genre[g] < 0.5:
+            pen += 0.05 * (0.5 - by_genre[g]) / 0.5  # up to 0.05
+    return min(0.35, pen)
 
 
 def _clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:

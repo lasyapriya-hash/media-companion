@@ -23,20 +23,18 @@ class Settings(BaseSettings):
 
     # External API credentials (server-side only)
     tmdb_api_key: str = ""
-    # Google Books is optional (Open Library is primary per spec D1) and needs
-    # no key for basic search; kept here for the Phase 6 fallback.
+    # Open Library is primary (spec §15 D1); Google Books is the fallback and
+    # works without a key for basic search — the key just raises rate limits.
     google_books_api_key: str = ""
-    anthropic_api_key: str = ""
-    # Model for the bounded mood-tag classification call (spec §6.4). Optional
-    # override; blank falls back to the service default.
-    mood_tags_model: str = ""
 
-    # --- LLM for free-text -> preference extraction (spec §7, §10) --- #
-    # Provider-agnostic: "gemini" (initial) or "none" to disable the LLM
-    # entirely. When disabled or key-less, the deterministic fallback runs.
+    # --- LLM provider (spec §7, §10, §15 D6/D7) --- #
+    # Provider-agnostic. "gemini" (initial) or "none" to disable the LLM
+    # entirely. When disabled or key-less: preference extraction uses the
+    # deterministic fallback and mood-tag classification is skipped. No
+    # Anthropic / paid-subscription dependency anywhere.
     llm_provider: str = "gemini"
     gemini_api_key: str = ""
-    # A current free-tier Gemini model (spec §15 D7). Blank -> service default.
+    # A current free-tier Gemini model. Blank -> service default.
     gemini_model: str = ""
 
     @field_validator("database_url")

@@ -57,12 +57,23 @@ class FakeClients:
             str(source_id), WatchAvailability(region="IN", status="unknown")
         )
 
-    # -- Open Library surface -- #
+    # -- Open Library / Google Books surface -- #
     # (same object; `discover` is dispatched by kwargs shape)
     def ol_discover(self, *, subjects=None, language=None, limit=20):
         if self._fail:
             raise RuntimeError("ol down")
         self.discover_calls.append(("ol", tuple(subjects or []), language))
+        return list(self._books[:limit])
+
+    def gb_discover(self, *, subjects=None, language=None, limit=20):
+        if self._fail:
+            raise RuntimeError("google books down")
+        self.discover_calls.append(("gb", tuple(subjects or []), language))
+        return list(self._books[:limit])
+
+    def gb_search(self, query, limit=20):
+        if self._fail:
+            raise RuntimeError("google books down")
         return list(self._books[:limit])
 
 
@@ -78,11 +89,20 @@ def wire(monkeypatch):
         def discover(self, **kw):
             return state["clients"].ol_discover(**kw)
 
-    def ol():
-        return _OL()
+    class _GB:
+        def discover(self, **kw):
+            return state["clients"].gb_discover(**kw)
+
+        def search(self, query, limit=20):
+            return state["clients"].gb_search(query, limit)
 
     monkeypatch.setattr("app.services.recommendations.candidates.tmdb_client", tmdb)
-    monkeypatch.setattr("app.services.recommendations.candidates.openlibrary_client", ol)
+    monkeypatch.setattr(
+        "app.services.recommendations.candidates.openlibrary_client", lambda: _OL()
+    )
+    monkeypatch.setattr(
+        "app.services.recommendations.candidates.google_books_client", lambda: _GB()
+    )
     monkeypatch.setattr("app.services.recommendations.tmdb_client", tmdb)
     monkeypatch.setattr(
         "app.services.recommendations.get_extractor", lambda: state["extractor"]

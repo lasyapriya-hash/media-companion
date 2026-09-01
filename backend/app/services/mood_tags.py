@@ -1,31 +1,27 @@
 """Mood/tone tagging for media items (spec §6.4).
 
-A bounded, one-shot Claude classification run on add (spec §15 D6). This is
-**not** a hard dependency: if ANTHROPIC_API_KEY is unset the feature is simply
-off, library creation still succeeds, and `mood_tags` stays empty until the
-backfill runs (`python -m app.scripts.backfill_mood_tags`).
-
-Only the Anthropic/Claude provider is used here, per spec §10. The recommendation
-system's LLM approach is decided separately, later.
+A bounded, one-shot **Gemini** classification run on add (spec §15 D6), through
+the shared provider-agnostic LLM layer (`app.services.llm`). This is **not** a
+hard dependency: with no LLM provider configured the feature is simply off,
+library creation still succeeds, and `mood_tags` stays empty until the backfill
+runs (`python -m app.scripts.backfill_mood_tags`). No Anthropic dependency.
 """
 from __future__ import annotations
 
 import json
 import logging
 
-from app.config import get_settings
+from app.services.llm import gemini_target
 from app.services.normalization import MOOD_TAG_VOCABULARY
 
 logger = logging.getLogger("uvicorn.error")
 
-# Small, cheap model for a constrained classification task.
-DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 MAX_TAGS = 5
 
 
 def is_enabled() -> bool:
-    """True when mood-tag classification can run (API key present)."""
-    return bool(get_settings().anthropic_api_key)
+    """True when mood-tag classification can run (an LLM provider is configured)."""
+    return gemini_target() is not None
 
 
 def _coerce_tags(raw: object) -> list[str]:
@@ -41,21 +37,15 @@ def _coerce_tags(raw: object) -> list[str]:
     return seen[:MAX_TAGS]
 
 
-def _call_anthropic(prompt: str) -> str:
-    """Single bounded Claude call. Isolated so it is easy to stub/replace."""
-    import anthropic  # lazy import: dependency is optional at runtime
+def _call_llm(prompt: str) -> str:
+    """Single bounded LLM call. Isolated so it is easy to stub/replace."""
+    from app.services.llm.gemini import GeminiMoodClassifier
 
-    client = anthropic.Anthropic(api_key=get_settings().anthropic_api_key)
-    msg = client.messages.create(
-        model=get_settings().mood_tags_model or DEFAULT_MODEL,
-        max_tokens=100,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return "".join(
-        block.text
-        for block in msg.content
-        if getattr(block, "type", None) == "text"
-    ).strip()
+    target = gemini_target()
+    if target is None:  # pragma: no cover - guarded by is_enabled()
+        raise RuntimeError("no LLM provider configured")
+    api_key, model = target
+    return GeminiMoodClassifier(api_key=api_key, model=model).classify(prompt)
 
 
 def classify_mood_tags(
@@ -80,7 +70,7 @@ def classify_mood_tags(
         "most salient first. No prose."
     )
     try:
-        text = _call_anthropic(prompt)
+        text = _call_llm(prompt)
         start, end = text.find("["), text.rfind("]")
         if start != -1 and end != -1:
             text = text[start : end + 1]

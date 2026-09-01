@@ -95,14 +95,23 @@ def _availability(item: NormalizedMedia) -> WatchAvailability | None:
 
 
 def _book_link(item: NormalizedMedia) -> str | None:
+    """A purchase/access link only when the book API actually provides one; the
+    field is otherwise omitted cleanly — no broken links (spec §5.4)."""
     media_type = getattr(item.type, "value", item.type)
     if media_type != "book":
         return None
     raw = item.raw_metadata if isinstance(item.raw_metadata, dict) else {}
+
+    if item.source == "google_books":
+        from app.clients.google_books import book_access_link
+
+        return book_access_link(raw)
+
+    # Open Library: link to the readable work only when it is actually readable.
     access = raw.get("ebook_access")
     if access in ("public", "borrowable", "printdisabled") or raw.get("ia"):
         return f"https://openlibrary.org/works/{item.source_id}"
-    return None  # omit cleanly (spec §5.4)
+    return None
 
 
 def _extract(
