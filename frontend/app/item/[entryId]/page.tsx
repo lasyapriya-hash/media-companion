@@ -11,14 +11,9 @@ import {
   type LibraryEntryOut,
   type LibraryStatus,
 } from "@/lib/api";
-import { GenreTags, MetaLine, PosterFrame, prettyLanguage } from "@/components/media";
+import { MediaDetail } from "@/components/media";
 
 const STATUSES: LibraryStatus[] = ["want", "in_progress", "completed", "dropped"];
-const KIND_LABEL: Record<string, string> = {
-  movie: "Film",
-  series: "Series",
-  book: "Book",
-};
 
 export default function ItemDetailPage() {
   const params = useParams<{ entryId: string }>();
@@ -99,7 +94,6 @@ export default function ItemDetailPage() {
   if (!entry) return <p className="muted">Opening the page&hellip;</p>;
 
   const m = entry.media;
-  const lang = prettyLanguage(m.language);
 
   return (
     <main>
@@ -107,104 +101,7 @@ export default function ItemDetailPage() {
         &larr; Collection
       </Link>
 
-      <div className="entry">
-        <aside className="entry__aside">
-          <div className="poster-link">
-            <PosterFrame media={m} favourite={favourite} />
-          </div>
-          <dl className="facts">
-            <div>
-              <dt>Your rating</dt>
-              <dd>{rating != null ? `${rating.toFixed(1)} / 10` : "—"}</dd>
-            </div>
-            {m.external_rating != null && (
-              <div>
-                <dt>Critics</dt>
-                <dd>{m.external_rating.toFixed(1)} / 10</dd>
-              </div>
-            )}
-            <div>
-              <dt>Format</dt>
-              <dd>{KIND_LABEL[m.type] ?? m.type}</dd>
-            </div>
-            {m.year && (
-              <div>
-                <dt>Year</dt>
-                <dd>{m.year}</dd>
-              </div>
-            )}
-            {lang && (
-              <div>
-                <dt>Language</dt>
-                <dd>{lang}</dd>
-              </div>
-            )}
-            {m.type === "movie" && m.runtime_minutes && (
-              <div>
-                <dt>Runtime</dt>
-                <dd>{m.runtime_minutes} min</dd>
-              </div>
-            )}
-            {m.type === "series" && (
-              <div>
-                <dt>Episodes</dt>
-                <dd>
-                  {m.seasons ?? "?"} seasons · {m.episodes ?? "?"} eps
-                </dd>
-              </div>
-            )}
-            {m.type === "book" && m.page_count && (
-              <div>
-                <dt>Length</dt>
-                <dd>{m.page_count} pages</dd>
-              </div>
-            )}
-            {m.length_bucket && (
-              <div>
-                <dt>Pace</dt>
-                <dd style={{ textTransform: "capitalize" }}>
-                  {m.length_bucket}
-                </dd>
-              </div>
-            )}
-          </dl>
-        </aside>
-
-        <div>
-          <h1 className="entry__title">
-            {m.title}
-            {favourite ? " ★" : ""}
-          </h1>
-          {m.author && <p className="entry__byline">by {m.author}</p>}
-          <MetaLine media={m} className="entry__meta" />
-
-          {m.genres.length > 0 && (
-            <div style={{ marginTop: "1rem" }}>
-              <GenreTags genres={m.genres} kind={m.type} max={8} />
-            </div>
-          )}
-
-          {m.description && <p className="entry__desc">{m.description}</p>}
-
-          <div style={{ marginTop: "1.25rem" }}>
-            <p className="field-label" style={{ marginBottom: "0.5rem" }}>
-              Mood
-            </p>
-            {m.mood_tags.length > 0 ? (
-              <div className="tags">
-                {m.mood_tags.map((t) => (
-                  <span key={t} className="tag">
-                    {t}
-                  </span>
-                ))}
-              </div>
-            ) : (
-              <p className="muted" style={{ margin: 0, fontSize: "0.85rem" }}>
-                Not yet classified.
-              </p>
-            )}
-          </div>
-
+      <MediaDetail media={m} favourite={favourite} yourRating={rating}>
           <section className="entry__section">
             <p className="kicker">Your notes</p>
 
@@ -346,8 +243,7 @@ export default function ItemDetailPage() {
               </button>
             </section>
           )}
-        </div>
-      </div>
+      </MediaDetail>
     </main>
   );
 }

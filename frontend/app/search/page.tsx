@@ -1,8 +1,10 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
 import {
   addToLibrary,
+  previewHref,
   searchMedia,
   type MediaType,
   type NormalizedMedia,
@@ -104,16 +106,22 @@ export default function DiscoverPage() {
             const state = added[key];
             return (
               <div key={key} className="shelf__item">
-                <div className="poster-link">
+                <Link
+                  href={previewHref(m)}
+                  prefetch={false}
+                  className="result-card poster-link"
+                  aria-label={`View details for ${m.title}`}
+                >
                   <Poster media={m} />
-                </div>
-                <div>
-                  <div className="caption__title">{m.title}</div>
-                  <MetaLine media={m} className="caption__meta" />
-                  {m.author && (
-                    <div className="caption__meta">by {m.author}</div>
-                  )}
-                </div>
+                  <div>
+                    <div className="caption__title">{m.title}</div>
+                    <MetaLine media={m} className="caption__meta" />
+                    {m.author && (
+                      <div className="caption__meta">by {m.author}</div>
+                    )}
+                    <span className="details-cue">View details &rarr;</span>
+                  </div>
+                </Link>
                 {m.genres.length > 0 && (
                   <GenreTags genres={m.genres} max={3} />
                 )}

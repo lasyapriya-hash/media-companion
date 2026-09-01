@@ -16,6 +16,7 @@ import logging
 
 from app.schemas.preference import PreferenceObject, ReleaseWindow
 from app.services.normalization import MOOD_TAG_VOCABULARY
+from app.services.vocab import normalise_mood_tone
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -99,10 +100,17 @@ def _to_preference(data: dict) -> PreferenceObject:
         data.get("intensity") if data.get("intensity") in ("low", "medium", "high") else None
     )
 
+    # Gemini's mood/tone strings are free-form ("pleasant", "cheery", ...); reduce
+    # them to the canonical vocabularies so scoring can act on them — the same
+    # mapping the deterministic fallback uses (spec §7).
+    mood, tone = normalise_mood_tone(
+        _clean_strlist(data.get("mood")), _clean_strlist(data.get("tone"))
+    )
+
     return PreferenceObject(
         media_type=media_type or None,
-        mood=_clean_strlist(data.get("mood")),
-        tone=_clean_strlist(data.get("tone")),
+        mood=mood,
+        tone=tone,
         genres=_clean_strlist(data.get("genres")),
         length=length,
         intensity=intensity,

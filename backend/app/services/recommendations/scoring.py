@@ -67,10 +67,17 @@ def _cand_genres(item: NormalizedMedia) -> set[str]:
 
 
 def _mood_terms(prefs: PreferenceObject) -> list[str]:
+    """Canonical mood/tone terms usable as `MOOD_TONE_GENRE_HINTS` keys.
+
+    Preferences that came through the fallback or the LLM extractor are already
+    canonical; the synonym remap only rescues a raw term (e.g. from a
+    client-supplied `preferences` body).
+    """
     terms: list[str] = []
     for raw in [*prefs.mood, *prefs.tone]:
         t = raw.strip().lower()
-        t = MOOD_SYNONYMS.get(t, TONE_SYNONYMS.get(t, t))
+        if t not in MOOD_TONE_GENRE_HINTS:
+            t = MOOD_SYNONYMS.get(t, TONE_SYNONYMS.get(t, t))
         if t and t not in terms:
             terms.append(t)
     return terms
@@ -303,13 +310,26 @@ def score_candidate(
     preference_match = sum(present) / len(present) if present else 0.0
     taste_match = _taste_profile_match(item, taste, exp)
     novelty = _novelty(item)
-    exp.novelty_high = novelty >= 0.6
     penalty = _penalty(item, taste)
+
+    # Novelty (spec §9.1) is a *small* diversity nudge — only meaningful when
+    # there is a real preference or taste signal to diversify around. With
+    # neither, novelty alone would rank obscure / low-rated titles first
+    # (an inversion of quality). In that degenerate case, spend the same 0.15
+    # weight on a mild quality prior instead (spec §9.3 allows `external_rating`
+    # as a low-weight quality floor).
+    has_signal = preference_match > 0.0 or taste_match > 0.0
+    if has_signal:
+        diversity = novelty
+        exp.novelty_high = novelty >= 0.6
+    else:
+        diversity = _clamp((item.external_rating or 6.0) / 10.0)
+        exp.novelty_high = False
 
     score = (
         W_PREF * preference_match
         + W_TASTE * taste_match
-        + W_NOVELTY * novelty
+        + W_NOVELTY * diversity
         - penalty
     )
     return ScoredCandidate(item, round(score, 4), round(taste_match, 4), exp)

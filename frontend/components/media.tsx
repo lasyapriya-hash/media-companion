@@ -4,6 +4,7 @@
 // no state beyond a per-image "failed to load" flag. Used by every page so the
 // collection, discovery, recommendations and detail views read as one journal.
 
+import type { ReactNode } from "react";
 import { useState } from "react";
 import type { MediaItemOut, MediaType, NormalizedMedia } from "@/lib/api";
 
@@ -138,6 +139,132 @@ export function GenreTags({
           {g}
         </span>
       ))}
+    </div>
+  );
+}
+
+/**
+ * Shared read-only presentation of a media item: poster + facts aside, then
+ * title / byline / meta / genres / description / mood. `children` slots in the
+ * page-specific block below — the tracking forms on the library detail page,
+ * or the "Add to collection" action on the preview page. Used by both so the
+ * detail experience is identical from every surface.
+ */
+export function MediaDetail({
+  media,
+  favourite = false,
+  yourRating,
+  children,
+}: {
+  media: AnyMedia;
+  favourite?: boolean;
+  /** Omit for a not-in-library preview; pass (number | null) for a library entry. */
+  yourRating?: number | null;
+  children?: ReactNode;
+}) {
+  const m = media;
+  const lang = prettyLanguage(m.language);
+  return (
+    <div className="entry">
+      <aside className="entry__aside">
+        <div className="poster-link">
+          <PosterFrame media={m} favourite={favourite} />
+        </div>
+        <dl className="facts">
+          {yourRating !== undefined && (
+            <div>
+              <dt>Your rating</dt>
+              <dd>{yourRating != null ? `${yourRating.toFixed(1)} / 10` : "—"}</dd>
+            </div>
+          )}
+          {m.external_rating != null && (
+            <div>
+              <dt>Critics</dt>
+              <dd>{m.external_rating.toFixed(1)} / 10</dd>
+            </div>
+          )}
+          <div>
+            <dt>Format</dt>
+            <dd>{KIND_LABEL[m.type] ?? m.type}</dd>
+          </div>
+          {m.year && (
+            <div>
+              <dt>Year</dt>
+              <dd>{m.year}</dd>
+            </div>
+          )}
+          {lang && (
+            <div>
+              <dt>Language</dt>
+              <dd>{lang}</dd>
+            </div>
+          )}
+          {m.type === "movie" && m.runtime_minutes && (
+            <div>
+              <dt>Runtime</dt>
+              <dd>{m.runtime_minutes} min</dd>
+            </div>
+          )}
+          {m.type === "series" && (
+            <div>
+              <dt>Episodes</dt>
+              <dd>
+                {m.seasons ?? "?"} seasons · {m.episodes ?? "?"} eps
+              </dd>
+            </div>
+          )}
+          {m.type === "book" && m.page_count && (
+            <div>
+              <dt>Length</dt>
+              <dd>{m.page_count} pages</dd>
+            </div>
+          )}
+          {m.length_bucket && (
+            <div>
+              <dt>Pace</dt>
+              <dd style={{ textTransform: "capitalize" }}>{m.length_bucket}</dd>
+            </div>
+          )}
+        </dl>
+      </aside>
+
+      <div>
+        <h1 className="entry__title">
+          {m.title}
+          {favourite ? " ★" : ""}
+        </h1>
+        {m.author && <p className="entry__byline">by {m.author}</p>}
+        <MetaLine media={m} className="entry__meta" />
+
+        {m.genres.length > 0 && (
+          <div style={{ marginTop: "1rem" }}>
+            <GenreTags genres={m.genres} kind={m.type} max={8} />
+          </div>
+        )}
+
+        {m.description && <p className="entry__desc">{m.description}</p>}
+
+        <div style={{ marginTop: "1.25rem" }}>
+          <p className="field-label" style={{ marginBottom: "0.5rem" }}>
+            Mood
+          </p>
+          {m.mood_tags.length > 0 ? (
+            <div className="tags">
+              {m.mood_tags.map((t) => (
+                <span key={t} className="tag">
+                  {t}
+                </span>
+              ))}
+            </div>
+          ) : (
+            <p className="muted" style={{ margin: 0, fontSize: "0.85rem" }}>
+              Not yet classified.
+            </p>
+          )}
+        </div>
+
+        {children}
+      </div>
     </div>
   );
 }

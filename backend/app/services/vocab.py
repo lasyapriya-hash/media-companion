@@ -83,6 +83,14 @@ TONE_SYNONYMS: dict[str, str] = {
     "hopeful": "uplifting",
     "feelgood": "uplifting",
     "feel-good": "uplifting",
+    # common "positive / easy watch" phrasings -> a canonical light/uplifting tone
+    "pleasant": "light",
+    "nice": "light",
+    "charming": "light",
+    "gentle": "light",
+    "cozy": "light",
+    "cosy": "light",
+    "wholesome": "uplifting",
 }
 
 # mood synonyms -> a tag in MOOD_TAG_VOCABULARY
@@ -90,6 +98,11 @@ MOOD_SYNONYMS: dict[str, str] = {
     "cosy": "cozy",
     "comforting": "cozy",
     "comfort": "cozy",
+    "gentle": "cozy",
+    # "a pleasant / nice / charming movie" -> the feel-good canonical tag
+    "pleasant": "feel-good",
+    "nice": "feel-good",
+    "charming": "feel-good",
     "scary": "tense",
     "suspenseful": "tense",
     "nail-biting": "tense",
@@ -242,6 +255,57 @@ _OL_LANG_3: dict[str, str] = {
 }
 
 MOOD_VOCABULARY: tuple[str, ...] = MOOD_TAG_VOCABULARY
+
+
+# --------------------------------------------------------------------------- #
+# Mood / tone canonicalisation (spec §7)
+# --------------------------------------------------------------------------- #
+def canonical_mood(term: str) -> str | None:
+    """Map a free-text term onto `MOOD_TAG_VOCABULARY`, or None if unrecognised."""
+    t = (term or "").strip().lower()
+    if not t:
+        return None
+    if t in MOOD_VOCABULARY:
+        return t
+    return MOOD_SYNONYMS.get(t)
+
+
+def canonical_tone(term: str) -> str | None:
+    """Map a free-text term onto `TONE_VOCABULARY`, or None if unrecognised."""
+    t = (term or "").strip().lower()
+    if not t:
+        return None
+    if t in TONE_VOCABULARY:
+        return t
+    return TONE_SYNONYMS.get(t)
+
+
+def normalise_mood_tone(
+    raw_moods: list[str], raw_tones: list[str]
+) -> tuple[list[str], list[str]]:
+    """Reduce arbitrary mood/tone phrases to the canonical vocabularies.
+
+    Both the deterministic fallback and the LLM extractor route their mood/tone
+    output through this so the two produce identical `PreferenceObject`s. A term
+    may contribute to both lists (e.g. "pleasant" -> mood "feel-good" + tone
+    "light"); anything unrecognised is dropped so "pleasant" can never survive
+    as an unusable preference.
+    """
+    moods: list[str] = []
+    tones: list[str] = []
+    seen: set[str] = set()
+    for term in [*(raw_moods or []), *(raw_tones or [])]:
+        key = (term or "").strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        m = canonical_mood(key)
+        if m and m not in moods:
+            moods.append(m)
+        tn = canonical_tone(key)
+        if tn and tn not in tones:
+            tones.append(tn)
+    return moods, tones
 
 
 def language_to_code(name_or_code: str) -> str | None:

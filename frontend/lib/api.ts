@@ -254,3 +254,46 @@ export interface TasteProfile {
 export function getTasteProfile() {
   return request<TasteProfile>("/taste-profile");
 }
+
+// --- Read-only detail preview for a not-yet-collected search / recommendation
+//     result. The item has no library-entry id, so the media object is carried
+//     in the URL to `/item/preview`. No new backend route. --- //
+
+const PREVIEW_DESC_CAP = 1500;
+
+export function previewHref(m: NormalizedMedia): string {
+  const slim: NormalizedMedia = {
+    source: m.source,
+    source_id: m.source_id,
+    type: m.type,
+    title: m.title,
+    description: m.description ? m.description.slice(0, PREVIEW_DESC_CAP) : m.description ?? null,
+    genres: m.genres ?? [],
+    language: m.language ?? null,
+    year: m.year ?? null,
+    external_rating: m.external_rating ?? null,
+    artwork_url: m.artwork_url ?? null,
+    runtime_minutes: m.runtime_minutes ?? null,
+    seasons: m.seasons ?? null,
+    episodes: m.episodes ?? null,
+    episode_runtime_minutes: m.episode_runtime_minutes ?? null,
+    author: m.author ?? null,
+    page_count: m.page_count ?? null,
+    length_bucket: m.length_bucket ?? null,
+    mood_tags: m.mood_tags ?? [],
+  };
+  return `/item/preview?m=${encodeURIComponent(JSON.stringify(slim))}`;
+}
+
+export function parsePreviewMedia(param: string | null): NormalizedMedia | null {
+  if (!param) return null;
+  try {
+    const o = JSON.parse(param) as Partial<NormalizedMedia>;
+    if (!o || typeof o.title !== "string" || !o.type || !o.source || !o.source_id) {
+      return null;
+    }
+    return { genres: [], mood_tags: [], ...o } as NormalizedMedia;
+  } catch {
+    return null;
+  }
+}

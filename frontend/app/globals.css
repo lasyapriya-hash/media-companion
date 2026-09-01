@@ -256,6 +256,34 @@ p {
 .shelf__item:hover .caption__title {
   color: var(--accent);
 }
+/* Discover result: the poster + caption is a link to the detail view; the
+   Add button stays a separate control alongside it (no nested interactives). */
+.result-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  color: inherit;
+}
+.result-card:hover .caption__title,
+.result-card:focus-visible .caption__title {
+  color: var(--accent);
+}
+.result-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+.details-cue {
+  display: inline-block;
+  margin-top: 0.4rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  color: var(--ink-faint);
+}
+.result-card:hover .details-cue,
+.result-card:focus-visible .details-cue {
+  color: var(--accent);
+}
 .caption__meta {
   margin-top: 0.25rem;
   font-size: 0.74rem;
@@ -488,6 +516,11 @@ p {
 }
 .pick__title a:hover {
   color: var(--accent);
+}
+.pick__title a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 3px;
 }
 .pick__meta {
   margin-top: 0.5rem;
@@ -796,6 +829,15 @@ input[type="range"] {
 }
 .backlink:hover {
   color: var(--ink);
+}
+/* `.backlink` can also be a button (router.back()) — undo the button chrome */
+button.backlink {
+  background: none;
+  border: 0;
+  padding: 0;
+  font-family: inherit;
+  font-weight: 400;
+  cursor: pointer;
 }
 
 /* ---------- responsive --------------------------------------- */

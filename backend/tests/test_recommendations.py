@@ -398,3 +398,78 @@ def test_all_sources_down_returns_503(client, wire):
 def test_empty_request_is_422(client, wire):
     assert client.post("/recommendations", json={}).status_code == 422
     assert client.post("/recommendations", json={"request": "   "}).status_code == 422
+
+
+# --------------------------------------------------------------------------- #
+# Mood/tone must actually match the request (regression: "pleasant" -> horror)
+# --------------------------------------------------------------------------- #
+def test_pleasant_request_ranks_feelgood_above_horror(client, wire):
+    wire["clients"] = FakeClients(
+        screen=[
+            _media("FG", genres=["Family", "Comedy"], rating=8.0, popularity=45.0,
+                   title="Sunny Lane", description="A warm, gentle small-town story."),
+            _media("HR", genres=["Horror"], rating=6.0, popularity=95.0,
+                   title="The Cellar", description="A malevolent presence in the walls."),
+        ]
+    )
+    resp = client.post("/recommendations", json={"request": "a pleasant movie"})
+    assert resp.status_code == 200
+    body = resp.json()
+    # "pleasant" now canonicalises to feel-good/light -> sufficient, no question
+    assert body["state"] == "results"
+    p = body["preferences"]
+    assert (set(p["mood"]) | set(p["tone"])) & {"feel-good", "uplifting", "light"}
+    ids = [r["media"]["source_id"] for r in body["results"]]
+    assert ids[0] == "FG"
+    assert ids.index("FG") < ids.index("HR")
+
+
+def test_dark_horror_request_still_favours_horror(client, wire):
+    """Negative polarity must not regress."""
+    wire["clients"] = FakeClients(
+        screen=[
+            _media("HR", genres=["Horror", "Thriller"], rating=6.4, popularity=50.0,
+                   title="Nightshade", description="A dark, dread-soaked descent."),
+            _media("FG", genres=["Family", "Comedy"], rating=8.3, popularity=50.0,
+                   title="Bright Meadow", description="A cheerful, sunny romp."),
+        ]
+    )
+    body = client.post(
+        "/recommendations", json={"request": "a dark horror movie"}
+    ).json()
+    ids = [r["media"]["source_id"] for r in body["results"]]
+    assert ids[0] == "HR"
+    assert ids.index("HR") < ids.index("FG")
+
+
+def test_blank_request_ranks_reasonable_above_obscure(client, wire):
+    """No preference + no taste signal: novelty must not invert quality."""
+    wire["clients"] = FakeClients(
+        screen=[
+            _media("REASONABLE", genres=["Drama"], rating=8.1, popularity=60.0,
+                   title="Well Regarded"),
+            _media("OBSCURE", genres=["Horror"], rating=5.2, popularity=8.0,
+                   title="Forgotten Reel"),
+        ]
+    )
+    body = client.post("/recommendations", json={"preferences": {}}).json()
+    assert body["state"] == "results"
+    ids = [r["media"]["source_id"] for r in body["results"]]
+    assert ids[0] == "REASONABLE"  # not the obscure/low-rated horror
+
+
+def test_zero_signal_scoring_uses_quality_prior_not_novelty():
+    """Component-level: with pref_match == 0 and taste_match == 0, a better-rated
+    candidate must outscore an obscure low-rated one (spec §9.1/§9.3)."""
+    from app.models.taste import TasteProfile
+    from app.services.recommendations.scoring import score_candidate
+
+    prefs = PreferenceObject()  # nothing at all
+    taste = TasteProfile(id=1, favourite_genres=[], favourite_languages=[])
+    good = _media("good", genres=["Drama"], rating=8.0, popularity=50.0)
+    obscure = _media("obscure", genres=["Drama"], rating=5.0, popularity=6.0)
+
+    sg = score_candidate(good, prefs, taste)
+    so = score_candidate(obscure, prefs, taste)
+    assert sg.explanation.any_preference_signal() is False
+    assert sg.score > so.score

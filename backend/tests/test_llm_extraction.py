@@ -145,3 +145,46 @@ def test_fallback_decade_window():
     rp = p.release_period
     assert getattr(rp, "from_year", None) == 1980 and getattr(rp, "to_year", None) == 1989
     assert "science fiction" in p.genres
+
+
+# --------------------------------------------------------------------------- #
+# Canonical mood/tone (regression: "pleasant" must not stay unusable)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "request_text",
+    ["a pleasant movie", "something nice to watch", "a charming film", "a gentle movie"],
+)
+def test_fallback_canonicalises_positive_mood_words(request_text):
+    p = parse_preferences(request_text)
+    canon = set(p.mood) | set(p.tone)
+    assert canon, f"{request_text!r} produced no mood/tone"
+    assert canon & {"feel-good", "uplifting", "light", "cozy", "wholesome"}
+    assert "pleasant" not in canon and "nice" not in canon and "charming" not in canon
+
+
+def test_gemini_normalises_arbitrary_mood_to_canonical(monkeypatch):
+    ex = GeminiExtractor(api_key="k")
+    monkeypatch.setattr(
+        ex,
+        "_raw_call",
+        lambda _t: (
+            '{"media_type":["movie"],"mood":["pleasant"],"tone":["pleasant"],'
+            '"genres":[],"language":[],"avoid":[],"explicit_fields":["mood"]}'
+        ),
+    )
+    p = ex.extract("a pleasant movie")
+    assert p is not None
+    assert "pleasant" not in p.mood and "pleasant" not in p.tone
+    assert (set(p.mood) | set(p.tone)) & {"feel-good", "uplifting", "light"}
+    assert p.media_type == ["movie"]
+
+
+def test_gemini_drops_unrecognised_mood_terms(monkeypatch):
+    ex = GeminiExtractor(api_key="k")
+    monkeypatch.setattr(
+        ex,
+        "_raw_call",
+        lambda _t: '{"mood":["zorptastic"],"tone":[],"genres":["Drama"]}',
+    )
+    p = ex.extract("x")
+    assert p is not None and p.mood == [] and p.genres == ["Drama"]

@@ -1,11 +1,13 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import {
   answerRecommendation,
   getRecommendations,
   getSurpriseRecommendations,
   getTasteProfile,
+  previewHref,
   type PreferenceObject,
   type RecommendationItem,
   type RecommendationResponse,
@@ -75,16 +77,27 @@ function AvailabilityNote({ item }: { item: RecommendationItem }) {
 
 function Pick({ item, index }: { item: RecommendationItem; index: number }) {
   const lead = index === 0;
+  const href = previewHref(item.media);
   return (
     <article className={lead ? "pick pick--lead" : "pick"}>
-      <div className="poster-link">
+      <Link
+        href={href}
+        prefetch={false}
+        className="poster-link"
+        tabIndex={-1}
+        aria-label={`View details for ${item.media.title}`}
+      >
         <Poster media={item.media} />
-      </div>
+      </Link>
       <div className="pick__body">
         <p className="pick__rank">
           {lead ? "The pick" : `Also — ${String(index + 1).padStart(2, "0")}`}
         </p>
-        <h2 className="pick__title">{item.media.title}</h2>
+        <h2 className="pick__title">
+          <Link href={href} prefetch={false}>
+            {item.media.title}
+          </Link>
+        </h2>
         <MetaLine media={item.media} className="pick__meta" />
         <div className="pick__tags">
           <GenreTags genres={item.media.genres} kind={item.media.type} />
