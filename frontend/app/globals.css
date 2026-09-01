@@ -421,6 +421,39 @@ p {
   margin-right: 0.4rem;
 }
 
+/* the single clarifying question (spec §8.3) — one question, one field */
+.clarify {
+  max-width: 680px;
+  margin: 0 auto 2.75rem;
+  padding-left: 1.1rem;
+  border-left: 2px solid var(--accent);
+}
+.clarify__label {
+  font-size: 0.7rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 0.5rem;
+}
+.clarify__q {
+  font-family: var(--font-serif);
+  font-size: 1.2rem;
+  line-height: 1.4;
+  color: var(--ink);
+  margin-bottom: 1.1rem;
+}
+.clarify__form input[type="text"] {
+  width: 100%;
+  font-size: 1rem;
+  padding: 0.7rem 0.9rem;
+}
+.clarify__actions {
+  margin-top: 0.9rem;
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
 /* ---------- curated picks ----------------------------------------- */
 .picks {
   display: flex;

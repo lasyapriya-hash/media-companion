@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import {
+  answerRecommendation,
   getRecommendations,
   getSurpriseRecommendations,
   getTasteProfile,
@@ -111,6 +112,8 @@ export default function RecommendPage() {
   const [asked, setAsked] = useState("");
   const [surprised, setSurprised] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [answerText, setAnswerText] = useState("");
+  const [answering, setAnswering] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [taste, setTaste] = useState<TasteProfile | null>(null);
 
@@ -125,6 +128,7 @@ export default function RecommendPage() {
     setLoading(true);
     setError(null);
     setResp(null);
+    setAnswerText("");
     try {
       if (kind === "surprise") {
         setResp(await getSurpriseRecommendations());
@@ -143,7 +147,22 @@ export default function RecommendPage() {
     }
   }
 
+  async function sendAnswer(answer: string) {
+    if (!resp) return;
+    setAnswering(true);
+    setError(null);
+    try {
+      setResp(await answerRecommendation(resp.session_id, answer));
+      setAnswerText("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAnswering(false);
+    }
+  }
+
   const tasteLine = tasteSentence(taste);
+  const needsClarify = resp?.state === "needs_clarification";
 
   return (
     <main>
@@ -214,7 +233,43 @@ export default function RecommendPage() {
 
       {error && <div className="error">{error}</div>}
 
-      {resp && (
+      {needsClarify && resp && (
+        <div className="clarify">
+          <p className="clarify__label">One more thing</p>
+          <p className="clarify__q">{resp.clarification_question}</p>
+          <form
+            className="clarify__form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              sendAnswer(answerText.trim());
+            }}
+          >
+            <input
+              type="text"
+              value={answerText}
+              onChange={(e) => setAnswerText(e.target.value)}
+              placeholder="A word or two is plenty"
+              aria-label="Your answer"
+              autoFocus
+            />
+            <div className="clarify__actions">
+              <button type="submit" disabled={answering}>
+                {answering ? "One sec…" : "Answer"}
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => sendAnswer("")}
+                disabled={answering}
+              >
+                Just recommend anyway
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {resp && !needsClarify && (
         <>
           <div className="note">
             <p className="note__label">

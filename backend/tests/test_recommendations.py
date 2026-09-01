@@ -245,10 +245,14 @@ def test_movie_ranking_uses_taste_profile(client, wire):
             _media("WE", genres=["Western"], rating=7.0, title="Dust Road"),
         ]
     )
-    # Sparse request -> candidates + ranking lean on the taste profile (spec §8.3)
-    resp = client.post("/recommendations", json={"request": "something to watch"})
-    assert resp.status_code == 200
-    body = resp.json()
+    # Sparse request -> one clarifying question; a declined answer proceeds to
+    # ranking, which then leans on the taste profile (spec §8.3).
+    q = client.post("/recommendations", json={"request": "something to watch"}).json()
+    assert q["state"] == "needs_clarification"
+    body = client.post(
+        f"/recommendations/{q['session_id']}/answer", json={"answer": ""}
+    ).json()
+    assert body["state"] == "results"
     assert body["results"][0]["media"]["source_id"] == "DR"
     # taste-driven candidate query carried the favourite genre
     assert any(

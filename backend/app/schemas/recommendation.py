@@ -1,6 +1,7 @@
-"""Request/response shapes for `POST /recommendations` (spec §5.3, §9.4)."""
+"""Request/response shapes for the recommendation session (spec §5.3, §8, §9.4)."""
 from __future__ import annotations
 
+import uuid
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -8,11 +9,16 @@ from pydantic import BaseModel, Field, model_validator
 from app.schemas.media import NormalizedMedia, WatchAvailability
 from app.schemas.preference import PreferenceObject
 
+# Client-facing session outcomes (spec §8.1). The DB keeps the full lifecycle
+# (`extracting`/`awaiting_answer`/`ranking`/…); the API collapses it to these.
+ClientState = Literal["needs_clarification", "results", "error"]
+
 
 class RecommendationRequest(BaseModel):
     """Free text, a pre-structured preference object, or both.
 
-    Supplying `preferences` bypasses the LLM entirely (spec §8.3 / Phase 4).
+    Supplying `preferences` bypasses both the LLM and the clarifying turn
+    (spec §8.3 / Phase 4) — the caller has already stated its intent.
     """
 
     request: str | None = Field(default=None, max_length=2000)
@@ -25,6 +31,16 @@ class RecommendationRequest(BaseModel):
         return self
 
 
+class ClarificationAnswer(BaseModel):
+    """The reply to the single clarifying question (spec §8.3).
+
+    An empty / absent answer is valid — it means "just recommend"; the flow
+    still proceeds straight to ranking.
+    """
+
+    answer: str | None = Field(default=None, max_length=2000)
+
+
 class RecommendationItem(BaseModel):
     media: NormalizedMedia
     score: float
@@ -34,8 +50,13 @@ class RecommendationItem(BaseModel):
 
 
 class RecommendationResponse(BaseModel):
-    # Which path produced the preference object. "fallback" also covers a
-    # client-supplied `preferences` object (no LLM was involved).
+    session_id: uuid.UUID
+    state: ClientState
+    # Which path produced the current preference object. "fallback" also covers a
+    # client-supplied `preferences` object and an empty/declined answer.
     extraction: Literal["llm", "fallback"]
     preferences: PreferenceObject
-    results: list[RecommendationItem]
+    # Present iff state == "needs_clarification".
+    clarification_question: str | None = None
+    # Present iff state == "results".
+    results: list[RecommendationItem] = Field(default_factory=list)

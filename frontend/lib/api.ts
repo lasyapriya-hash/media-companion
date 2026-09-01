@@ -204,8 +204,11 @@ export interface RecommendationItem {
 }
 
 export interface RecommendationResponse {
+  session_id: string;
+  state: "needs_clarification" | "results" | "error";
   extraction: "llm" | "fallback";
   preferences: PreferenceObject;
+  clarification_question?: string | null;
   results: RecommendationItem[];
 }
 
@@ -214,6 +217,14 @@ export function getRecommendations(text: string) {
     method: "POST",
     body: JSON.stringify({ request: text }),
   });
+}
+
+/** Reply to the single clarifying question (spec §8.3). Empty answer = "just recommend". */
+export function answerRecommendation(sessionId: string, answer: string) {
+  return request<RecommendationResponse>(
+    `/recommendations/${sessionId}/answer`,
+    { method: "POST", body: JSON.stringify({ answer }) },
+  );
 }
 
 /**
