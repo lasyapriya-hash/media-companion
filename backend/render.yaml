@@ -25,6 +25,14 @@ services:
         sync: false
       - key: ANTHROPIC_API_KEY
         sync: false
+      # LLM for preference extraction (spec §10). Optional: the deterministic
+      # fallback runs when unset. "gemini" or "none".
+      - key: LLM_PROVIDER
+        value: gemini
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        sync: false
 
 databases:
   - name: media-companion-db

@@ -165,3 +165,53 @@ export function updateProgress(entryId: string, patch: ProgressPatch) {
     body: JSON.stringify(patch),
   });
 }
+
+// --- Recommendations (spec §5.3, §9) --- //
+
+export interface ReleaseWindow {
+  from_year?: number | null;
+  to_year?: number | null;
+}
+
+export interface PreferenceObject {
+  media_type?: MediaType[] | null;
+  mood: string[];
+  tone: string[];
+  genres: string[];
+  length?: LengthBucket | null;
+  intensity?: "low" | "medium" | "high" | null;
+  language: string[];
+  release_period?: ReleaseWindow | "recent" | "classic" | null;
+  avoid: string[];
+  explicit_fields: string[];
+}
+
+export interface WatchAvailability {
+  region: string;
+  status: string;
+  flatrate: string[];
+  rent: string[];
+  buy: string[];
+  link?: string | null;
+}
+
+export interface RecommendationItem {
+  media: NormalizedMedia;
+  score: number;
+  reason: string;
+  availability?: WatchAvailability | null;
+  book_link?: string | null;
+}
+
+export interface RecommendationResponse {
+  extraction: "llm" | "fallback";
+  preferences: PreferenceObject;
+  results: RecommendationItem[];
+}
+
+export function getRecommendations(text: string) {
+  return request<RecommendationResponse>("/recommendations", {
+    method: "POST",
+    body: JSON.stringify({ request: text }),
+  });
+}

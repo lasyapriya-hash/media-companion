@@ -28,6 +28,7 @@ export default function RootLayout({
             </Link>
             <Link href="/">Library</Link>
             <Link href="/search">Search &amp; add</Link>
+            <Link href="/recommend">Recommend</Link>
           </nav>
           {children}
         </div>

@@ -31,6 +31,14 @@ class Settings(BaseSettings):
     # override; blank falls back to the service default.
     mood_tags_model: str = ""
 
+    # --- LLM for free-text -> preference extraction (spec §7, §10) --- #
+    # Provider-agnostic: "gemini" (initial) or "none" to disable the LLM
+    # entirely. When disabled or key-less, the deterministic fallback runs.
+    llm_provider: str = "gemini"
+    gemini_api_key: str = ""
+    # A current free-tier Gemini model (spec §15 D7). Blank -> service default.
+    gemini_model: str = ""
+
     @field_validator("database_url")
     @classmethod
     def _normalize_db_url(cls, v: str) -> str:

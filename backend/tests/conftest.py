@@ -10,6 +10,8 @@ os.environ["DATABASE_URL"] = os.environ.get(
     "TEST_DATABASE_URL", "postgresql+psycopg://localhost/media_companion_test"
 )
 os.environ["ANTHROPIC_API_KEY"] = ""  # mood-tag feature off unless a test enables it
+os.environ["LLM_PROVIDER"] = "none"  # preference extraction uses the deterministic
+os.environ["GEMINI_API_KEY"] = ""  # fallback unless a test enables the LLM
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

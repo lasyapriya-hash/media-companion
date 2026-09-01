@@ -182,6 +182,53 @@ class TMDbClient:
         payload = self._get(f"/{_TMDB_PATH[media_type]}/{source_id}")
         return normalize_tmdb_details(payload, media_type)
 
+    def discover(
+        self,
+        media_type: str,
+        *,
+        genres: list[str] | None = None,
+        language: str | None = None,
+        year_from: int | None = None,
+        year_to: int | None = None,
+        limit: int = 20,
+    ) -> list[NormalizedMedia]:
+        """Preference-driven candidate query via `/discover` (spec §8.2).
+
+        Genre *names* are resolved to TMDb ids; unknown names are dropped.
+        `sort_by=popularity.desc` only shapes the candidate pool — ranking is
+        done downstream and never uses popularity or rating as a sort key
+        (spec §9.3).
+        """
+        tmdb_media = _TMDB_PATH[media_type]
+        gmap = self._genres(tmdb_media)
+        by_name = {name.lower(): gid for gid, name in gmap.items()}
+        genre_ids = [
+            str(by_name[g.strip().lower()])
+            for g in (genres or [])
+            if g.strip().lower() in by_name
+        ]
+
+        params: dict[str, object] = {
+            "sort_by": "popularity.desc",
+            "include_adult": "false",
+            "page": 1,
+        }
+        if genre_ids:
+            params["with_genres"] = ",".join(genre_ids)
+        if language:
+            params["with_original_language"] = language
+        date_field = "primary_release_date" if media_type == "movie" else "first_air_date"
+        if year_from:
+            params[f"{date_field}.gte"] = f"{year_from}-01-01"
+        if year_to:
+            params[f"{date_field}.lte"] = f"{year_to}-12-31"
+
+        data = self._get(f"/discover/{tmdb_media}", params)
+        return [
+            normalize_tmdb_search(r, media_type, gmap)
+            for r in data.get("results", [])[:limit]
+        ]
+
     def get_watch_providers(
         self, source_id: str, media_type: str, region: str = DEFAULT_REGION
     ) -> WatchAvailability:

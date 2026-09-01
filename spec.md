@@ -94,7 +94,9 @@ multi-turn conversation flow (Section 8). Deepen in a later cycle.
 ### 5.3 Conversational Natural-Language Recommendations (multi-turn)
 
 - User describes mood / situation / constraints in free text.
-- Claude extracts a **structured preference object** (Section 7).
+- An **LLM** (provider-agnostic; Google Gemini initially) extracts a
+  **structured preference object** (Section 7) from that free text — this is the
+  LLM's only role in the flow.
 - **Clarification rule:** if the extracted preferences are too sparse for a
   confident recommendation, the agent asks **exactly one** follow-up question,
   then proceeds regardless of the answer. Hard cap of one clarifying turn — no
@@ -107,7 +109,8 @@ multi-turn conversation flow (Section 8). Deepen in a later cycle.
   overlap for books.
 - Each recommendation carries a **one-sentence reason** that references the
   actual request (e.g. *"you usually enjoy Korean romantic comedies and this
-  has short, light episodes with a similar tone"*).
+  has short, light episodes with a similar tone"*), assembled deterministically
+  from the matched signals (Section 9.4) — not written by the LLM.
 - Recommendations must **not** simply be the highest-rated items (Section 9.3).
 
 ### 5.4 Availability
@@ -229,11 +232,13 @@ v0 it is used only as a light tiebreaker, if at all.
 
 ### 6.4 Derived tags & bucket mappings
 
-- **`mood_tags`** on `media_item` are assigned at fetch time by Claude from
-  the synopsis + genres (a bounded, one-shot classification call), drawn from a
-  fixed vocabulary, e.g. `cozy`, `tense`, `feel-good`, `dark`, `bittersweet`,
-  `slow-burn`, `high-energy`, `cerebral`, `escapist`, `romantic`, `bleak`,
-  `wholesome`. The vocabulary is a constant in the codebase.
+- **`mood_tags`** on `media_item` are assigned at fetch time by a bounded,
+  one-shot **LLM** classification call (provider-agnostic; see Section 10) from
+  the synopsis + genres, drawn from a fixed vocabulary, e.g. `cozy`, `tense`,
+  `feel-good`, `dark`, `bittersweet`, `slow-burn`, `high-energy`, `cerebral`,
+  `escapist`, `romantic`, `bleak`, `wholesome`. The vocabulary is a constant in
+  the codebase. This call is optional: with no LLM provider configured the field
+  is left empty and backfilled later.
 - **`length_bucket`** mapping:
   - movie: `<90 min` → short, `90–150` → medium, `>150` → long
   - series: episode runtime `<30 min` → short, `30–50` → medium, `>50` → long
@@ -243,8 +248,9 @@ v0 it is used only as a light tiebreaker, if at all.
 
 ## 7. Preference Object
 
-The structured output Claude extracts from the free-text request. All fields
-optional; absent fields are `null` or `[]`.
+The structured output the LLM (or the deterministic fallback, Section 8.3)
+produces from the free-text request. All fields optional; absent fields are
+`null` or `[]`.
 
 ```jsonc
 {
@@ -274,7 +280,7 @@ optional; absent fields are `null` or `[]`.
                  ┌─────────────┐
    request  ──▶  │  extracting │
                  └──────┬──────┘
-                        │  Claude returns preference object
+                        │  LLM (or fallback) returns preference object
               ┌─────────┴───────────┐
        sufficient?                sparse?  (rule 8.3)
               │                        │
@@ -312,9 +318,13 @@ optional; absent fields are `null` or `[]`.
 - `ranking` **always** produces a non-empty result list (falling back per
   8.3) unless the underlying APIs are all unavailable, which routes to
   `error`.
-- Candidate generation (querying TMDb / book APIs) is driven by the preference
-  object, **not** by Claude. Claude is used only for extraction, the one
-  clarifying question, and the per-result reason text.
+- Candidate generation (querying TMDb / book APIs), scoring, and ranking are
+  driven by the preference object and the taste profile in deterministic
+  backend code — **never** by the LLM. The LLM's **only** role is extracting the
+  preference object from free text (Section 7), and it always sits behind a
+  deterministic fallback (Section 8.3). The single clarifying question
+  (Section 8.3) and every per-result reason (Section 9.4) are produced from
+  templates over structured data, not by the LLM.
 
 ### 8.3 Sparsity rule (precise)
 
@@ -329,10 +339,13 @@ Preferences are **sufficient** — proceed straight to `ranking` — if **any** 
    `{tone, media_type, length, language}` is populated; **or**
 3. three or more fields in the richness set are populated.
 
-Otherwise preferences are **sparse** → ask exactly one clarifying question.
+Otherwise preferences are **sparse** → ask exactly one clarifying question. That
+question is selected deterministically from a fixed templated set, keyed on
+which richness fields are missing — no LLM call.
 
 After the answer (or if the user declines / a short timeout elapses):
-re-run extraction on the reply, **merge** into the existing preference object
+re-run extraction on the reply (LLM if available, deterministic parser
+otherwise), **merge** into the existing preference object
 (new non-null values win; `avoid` lists union), set `clarification_used = true`,
 and go to `ranking` **unconditionally** — even if still sparse.
 
@@ -406,9 +419,12 @@ Both terms 0–1. Taste profile enters only as a tiebreaker
 
 - Top **N** results (N in Section 15; default 8).
 - Each result: the `media_item` display fields, the availability block
-  (Section 5.4), the `score`, and a **one-sentence reason** generated by
-  Claude from the structured match explanation (which sub-signals matched +
-  one taste-profile fact). Reasons must be request-specific, not generic.
+  (Section 5.4), the `score`, and a **one-sentence reason** assembled
+  **deterministically** from the structured match explanation — a template over
+  which sub-signals matched (genres, mood/tone, length, language, period) plus
+  one taste-profile fact. Reasons must be request-specific, not generic;
+  because the template names the request's own matched fields, this holds with
+  no LLM call.
 
 ---
 
@@ -418,9 +434,11 @@ Both terms 0–1. Taste profile enters only as a tiebreaker
 |---|---|
 | **TMDb** | movie/series search, metadata, watch providers (region IN) |
 | **Open Library** *(primary)* or **Google Books** *(fallback / primary — 15)* | book search and metadata |
-| **Claude (Anthropic API)** | preference extraction, the single clarifying question, `mood_tags` classification, per-result reason text. **Not** used for candidate generation or search. |
+| **LLM provider** — Google **Gemini** initially (a current free-tier model), behind a provider-agnostic interface so it can be swapped | **Only** two bounded JSON calls: natural-language request → structured preference object (Section 7), and the optional `mood_tags` classification (Section 6.4). **Not** used for candidate generation, search, ranking, the clarifying question, or reason text. Always behind a deterministic fallback — the app is fully usable with **no LLM provider and no Anthropic access**. |
 
-Keeping candidate generation on the data APIs bounds cost and latency.
+Keeping candidate generation on the data APIs bounds cost and latency; keeping
+the LLM to one small extraction call with a deterministic fallback means the
+deployed app never depends on paid or personal-subscription LLM access.
 
 ---
 
@@ -453,7 +471,8 @@ Keeping candidate generation on the data APIs bounds cost and latency.
 - **NFR4** — No console or runtime errors during normal use.
 - **NFR5** — A recommendation response, including any clarification
   round-trip, completes in a reasonable time for a live demo — target under
-  ~8 s per turn under normal conditions.
+  ~8 s per turn under normal conditions. The deterministic fallback path has no
+  LLM round-trip and is effectively instant.
 
 ---
 
@@ -464,6 +483,7 @@ Keeping candidate generation on the data APIs bounds cost and latency.
 | Backend | FastAPI (Python) |
 | Frontend | React / Next.js |
 | Database | Postgres — persistence must survive redeploys; no local or in-memory-only storage |
+| LLM | Provider-agnostic interface; Google Gemini (free-tier model) initially. Used only for request → preference extraction and the optional `mood_tags` call. Optional — a deterministic fallback keeps the engine working with no LLM access; no Anthropic / personal-subscription dependency |
 | Auth | none — single-user instance |
 | Deployment | backend + Postgres on Render or Railway; frontend on Vercel, or a single combined target (Section 15) |
 
@@ -472,8 +492,10 @@ Keeping candidate generation on the data APIs bounds cost and latency.
 ## 14. Deployment Requirements
 
 - A working **public URL**; no local-only functionality.
-- Environment variables for **all** API keys (TMDb, book API, Anthropic).
-  Never committed to the repo, never shipped to the client bundle.
+- Environment variables for **all** API keys (TMDb, book API, and the LLM
+  provider — `GEMINI_API_KEY` initially). Never committed to the repo, never
+  shipped to the client bundle. The backend must start and serve
+  recommendations even when the LLM provider key is absent.
 
 ---
 
@@ -487,6 +509,7 @@ Keeping candidate generation on the data APIs bounds cost and latency.
 | D4 | Scoring weight vector `w1/w2/w3` and sub-signal weights | 0.50 / 0.35 / 0.15 |
 | D5 | Rating input widget granularity (slider vs 10 half-star clicks) | slider, 0.5 steps |
 | D6 | Whether `mood_tags` classification is precomputed on add vs lazily on first recommendation use | on add |
+| D7 | LLM provider + model for preference extraction | Google Gemini, a current free-tier model (e.g. `gemini-2.5-flash`), behind a swappable interface; deterministic fallback always present |
 
 ---
 
@@ -524,6 +547,8 @@ Keeping candidate generation on the data APIs bounds cost and latency.
 - Streaming or hosting media content.
 - Open-ended (unbounded) conversational clarification.
 - A trained / from-scratch ML recommendation model.
+- LLM-generated candidate lists, ranking, or reason text — the LLM only
+  interprets the request into structured preferences.
 - Cross-session conversation history.
 
 ---
@@ -535,4 +560,5 @@ Keeping candidate generation on the data APIs bounds cost and latency.
 | Multi-turn conversation state adds real complexity — session handling and the exact one-question rule need precise logic. The main implementation-complexity risk in v0. | State machine and sparsity rule are fully specified (Sections 8.1–8.3); `clarification_used` is a hard invariant; fallback path guarantees a result. |
 | Book API coverage/quality varies more than TMDb's. | Lighter v0 scope for books deliberately absorbs this; primary/fallback API pair (D1). |
 | TMDb watch-provider data is region-specific and sometimes incomplete. | "availability unknown" fallback state exists specifically for this. |
-| Claude latency could push past the ~8 s demo target. | Claude is off the candidate-generation path; extraction and reason text are the only per-turn calls; `mood_tags` precomputed on add (D6). |
+| LLM latency or unavailability (Gemini free tier — rate limits, cold calls) could slow a turn past ~8 s or fail outright. | The LLM does only preference extraction — one bounded JSON call with a single short timeout, off the candidate / ranking / reason paths. A deterministic keyword+vocabulary parser produces the preference object with no network call, so recommendations still return. `mood_tags` precomputed on add (D6) and also optional. |
+| The deployed app must not depend on a personal Claude subscription or paid Anthropic access. | LLM access is optional and behind a provider-agnostic interface (Gemini free tier initially). Every LLM-touched feature — preference extraction and `mood_tags` — has a deterministic path. Anthropic is never a required dependency. |

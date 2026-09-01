@@ -108,3 +108,28 @@ class OpenLibraryClient:
         key = work_id if work_id.startswith("/works/") else f"/works/{work_id}"
         payload = request_json(self._http, f"{key}.json")
         return normalize_ol_work(payload)
+
+    def discover(
+        self,
+        *,
+        subjects: list[str] | None = None,
+        language: str | None = None,
+        limit: int = 20,
+    ) -> list[NormalizedMedia]:
+        """Subject-driven candidate query for book recommendations (spec §8.2).
+
+        Builds an OR of `subject:"…"` clauses; with no subjects it falls back to
+        a broad popular query so the pool is never empty.
+        """
+        clauses = [f'subject:"{s.strip()}"' for s in (subjects or []) if s.strip()]
+        params: dict[str, object] = {
+            "q": " OR ".join(clauses) if clauses else "*",
+            "limit": limit,
+            "fields": SEARCH_FIELDS,
+        }
+        if not clauses:
+            params["sort"] = "readinglog"  # broad-popularity fallback pool
+        if language:
+            params["language"] = language
+        data = request_json(self._http, "/search.json", params)
+        return [normalize_ol_doc(d) for d in data.get("docs", [])[:limit]]
