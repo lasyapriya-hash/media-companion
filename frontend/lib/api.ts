@@ -215,3 +215,31 @@ export function getRecommendations(text: string) {
     body: JSON.stringify({ request: text }),
   });
 }
+
+/**
+ * "Surprise me" — recommendations driven purely by the derived taste profile.
+ * Posts an empty preference object, which the existing Phase 4 orchestrator
+ * already treats as a sparse request and fills from the taste profile. No new
+ * endpoint, no LLM call.
+ */
+export function getSurpriseRecommendations() {
+  return request<RecommendationResponse>("/recommendations", {
+    method: "POST",
+    body: JSON.stringify({ preferences: {} }),
+  });
+}
+
+export interface TasteProfile {
+  favourite_genres: string[];
+  favourite_languages: string[];
+  avg_rating_by_genre: Record<string, number>;
+  avg_rating_by_language: Record<string, number>;
+  completion_rate: number | null;
+  completion_rate_by_genre: Record<string, number>;
+  drop_patterns: string[];
+  computed_at: string | null;
+}
+
+export function getTasteProfile() {
+  return request<TasteProfile>("/taste-profile");
+}

@@ -1,11 +1,11 @@
 import type { Metadata, Viewport } from "next";
-import Link from "next/link";
 import "./globals.css";
+import SiteNav from "@/components/SiteNav";
 
 export const metadata: Metadata = {
-  title: "Personal Media Companion",
+  title: "Media Companion",
   description:
-    "One library for movies, series, and books, with natural-language recommendations.",
+    "A personal journal for the films, series, and books you watch, read, and want to — with recommendations you ask for in your own words.",
 };
 
 export const viewport: Viewport = {
@@ -21,15 +21,8 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
-        <div className="container">
-          <nav className="site-nav">
-            <Link href="/" className="brand">
-              Media Companion
-            </Link>
-            <Link href="/">Library</Link>
-            <Link href="/search">Search &amp; add</Link>
-            <Link href="/recommend">Recommend</Link>
-          </nav>
+        <div className="wrap">
+          <SiteNav />
           {children}
         </div>
       </body>
