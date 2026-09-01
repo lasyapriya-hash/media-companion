@@ -153,6 +153,12 @@ export function updateEntry(entryId: string, patch: EntryPatch) {
   });
 }
 
+/** Remove the library entry (status/rating/notes/favourite/progress). The
+ *  underlying media metadata is kept, so the title stays searchable. */
+export function removeEntry(entryId: string) {
+  return request<void>(`/library/${entryId}`, { method: "DELETE" });
+}
+
 export interface ProgressPatch {
   seasons_completed?: number;
   current_season?: number | null;

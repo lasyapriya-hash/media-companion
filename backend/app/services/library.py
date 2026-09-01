@@ -205,6 +205,19 @@ def update_entry(
     return entry
 
 
+def remove_from_library(db: Session, entry_id: uuid.UUID) -> None:
+    """Delete the user's `library_entry` (status / rating / review / favourite)
+    and its `series_progress`. The cached `media_item` metadata is left intact,
+    so the title stays searchable and can still be recommended.
+    """
+    entry = get_entry(db, entry_id)  # raises EntryNotFound
+    db.delete(entry)  # series_progress cascades (ORM + FK ondelete)
+    db.commit()
+    # The removed entry may have carried a status / rating, so the derived
+    # taste profile can shift (FR9) — same as add/update.
+    taste_profile.recompute(db)
+
+
 def update_progress(
     db: Session, entry_id: uuid.UUID, patch: UpdateProgressRequest
 ) -> LibraryEntry:

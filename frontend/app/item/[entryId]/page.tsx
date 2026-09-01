@@ -1,10 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
   getEntry,
+  removeEntry,
   STATUS_LABELS,
   updateEntry,
   updateProgress,
@@ -18,11 +19,16 @@ const STATUSES: LibraryStatus[] = ["want", "in_progress", "completed", "dropped"
 export default function ItemDetailPage() {
   const params = useParams<{ entryId: string }>();
   const entryId = params.entryId;
+  const router = useRouter();
 
   const [entry, setEntry] = useState<LibraryEntryOut | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
 
   const [status, setStatus] = useState<LibraryStatus>("want");
   const [favourite, setFavourite] = useState(false);
@@ -87,6 +93,18 @@ export default function ItemDetailPage() {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function remove() {
+    setRemoving(true);
+    setRemoveError(null);
+    try {
+      await removeEntry(entryId);
+      router.push("/");
+    } catch (e) {
+      setRemoveError(e instanceof Error ? e.message : String(e));
+      setRemoving(false);
     }
   }
 
@@ -243,6 +261,58 @@ export default function ItemDetailPage() {
               </button>
             </section>
           )}
+
+          <section className="entry__section">
+            <p className="kicker">Remove</p>
+            {!confirmingRemove ? (
+              <button
+                type="button"
+                className="danger"
+                onClick={() => {
+                  setConfirmingRemove(true);
+                  setRemoveError(null);
+                }}
+              >
+                Remove from collection
+              </button>
+            ) : (
+              <div className="confirm-danger">
+                <p className="confirm-danger__q">
+                  Remove &ldquo;{m.title}&rdquo; from your collection?
+                </p>
+                <p
+                  className="muted"
+                  style={{ margin: 0, fontSize: "0.9rem" }}
+                >
+                  Your status, rating, review, and favourite flag
+                  {m.type === "series" ? ", plus series progress," : ""} for
+                  this entry will be deleted. The title itself stays
+                  searchable and can still be recommended.
+                </p>
+                <div className="confirm-danger__actions">
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => setConfirmingRemove(false)}
+                    disabled={removing}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="danger"
+                    onClick={remove}
+                    disabled={removing}
+                  >
+                    {removing ? "Removing…" : "Remove"}
+                  </button>
+                </div>
+                {removeError && (
+                  <div className="error">{removeError}</div>
+                )}
+              </div>
+            )}
+          </section>
       </MediaDetail>
     </main>
   );

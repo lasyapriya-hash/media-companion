@@ -733,6 +733,34 @@ button.chip--surprise:hover:not(:disabled) {
   color: var(--accent);
   border-color: var(--accent);
 }
+/* destructive action — quiet, outlined, no loud red fill */
+button.danger {
+  background: transparent;
+  color: var(--err);
+  border: 1px solid var(--rule);
+}
+button.danger:hover:not(:disabled) {
+  background: transparent;
+  color: var(--err);
+  border-color: var(--err);
+}
+.confirm-danger {
+  padding-left: 1.1rem;
+  border-left: 2px solid var(--err);
+}
+.confirm-danger__q {
+  font-family: var(--font-serif);
+  font-size: 1.1rem;
+  line-height: 1.4;
+  color: var(--ink);
+  margin-bottom: 0.5rem;
+}
+.confirm-danger__actions {
+  margin-top: 1rem;
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
 button:disabled {
   opacity: 0.45;
   cursor: not-allowed;

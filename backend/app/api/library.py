@@ -51,6 +51,14 @@ def update_item(
         raise HTTPException(status_code=404, detail="Library entry not found") from exc
 
 
+@router.delete("/{entry_id}", status_code=204)
+def remove_item(entry_id: uuid.UUID, db: Session = Depends(get_db)) -> None:
+    try:
+        svc.remove_from_library(db, entry_id)
+    except svc.EntryNotFound as exc:
+        raise HTTPException(status_code=404, detail="Library entry not found") from exc
+
+
 @router.put("/{entry_id}/progress", response_model=LibraryEntryOut)
 def update_item_progress(
     entry_id: uuid.UUID, req: UpdateProgressRequest, db: Session = Depends(get_db)
