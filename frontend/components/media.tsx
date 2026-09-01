@@ -16,6 +16,17 @@ const KIND_LABEL: Record<MediaType, string> = {
   book: "Book",
 };
 
+/** "5 seasons · 62 eps", or just the part we actually have. Never renders "?". */
+export function seriesCount(
+  seasons?: number | null,
+  episodes?: number | null,
+): string {
+  const parts: string[] = [];
+  if (seasons) parts.push(`${seasons} season${seasons === 1 ? "" : "s"}`);
+  if (episodes) parts.push(`${episodes} eps`);
+  return parts.join(" · ");
+}
+
 export function prettyLanguage(code?: string | null): string | null {
   if (!code) return null;
   const c = code.trim();
@@ -205,12 +216,10 @@ export function MediaDetail({
               <dd>{m.runtime_minutes} min</dd>
             </div>
           )}
-          {m.type === "series" && (
+          {m.type === "series" && (m.seasons || m.episodes) && (
             <div>
               <dt>Episodes</dt>
-              <dd>
-                {m.seasons ?? "?"} seasons · {m.episodes ?? "?"} eps
-              </dd>
+              <dd>{seriesCount(m.seasons, m.episodes)}</dd>
             </div>
           )}
           {m.type === "book" && m.page_count && (

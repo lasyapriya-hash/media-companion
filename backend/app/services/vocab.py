@@ -47,6 +47,12 @@ GENRE_SYNONYMS: dict[str, str] = {
     "rom-com": "romance",
     "romcom": "romance",
     "romantic comedy": "romance",
+    # "a romantic movie" / "a love story" is a Romance *content* request, not
+    # only a mood — keep it as a genre signal alongside the mood one (spec §7).
+    "romantic": "romance",
+    "love story": "romance",
+    "love-story": "romance",
+    "love stories": "romance",
     "documentaries": "documentary",
     "docs": "documentary",
     "thrillers": "thriller",

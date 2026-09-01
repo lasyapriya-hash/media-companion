@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 
-from app.schemas.preference import PreferenceObject, ReleaseWindow
+from app.schemas.preference import PreferenceObject, RatingRange, ReleaseWindow
 from app.services.vocab import (
     CLASSIC_WORDS,
     GENRE_SYNONYMS,
@@ -49,6 +49,95 @@ _AVOID_RE = re.compile(
     r"\b(?:no|not|without|avoid|avoiding|nothing|none|skip|hate|dislike)\s+"
     r"(?:the\s+|any\s+|too\s+|really\s+)*([a-z][a-z\-]{2,20})"
 )
+# comparative stop-words that only ever belong to a rating clause
+# ("no more than 6", "no less than 8") — never a thing to avoid.
+_AVOID_STOPWORDS = {"more", "less", "fewer", "than"}
+
+# --------------------------------------------------------------------------- #
+# Explicit numeric rating bounds (spec §7). Extracted from the *pristine* text
+# so a "no more than X" clause is read as a bound, not as an `avoid`.
+# --------------------------------------------------------------------------- #
+_RATING_NUM = r"(?:10(?:\.0)?|[0-9](?:\.[0-9])?)"  # 0.0 – 10.0
+_RATING_CUE_RE = re.compile(
+    r"\b(?:rated|rating|ratings|score|scored|scores|star|stars|imdb|"
+    r"rotten\s+tomatoes|metacritic)\b|/\s?10|out of 10"
+)
+_RATING_OP_RE = re.compile(rf"(>=|<=|>|<)\s*(?P<num>{_RATING_NUM})\b")
+# trailing token varies ("7.5+", "8 or higher") — no closing \b: "+" is
+# non-word so \b after it would never hold.
+_RATING_SUFFIX_UP_RE = re.compile(
+    rf"\b(?P<num>{_RATING_NUM})\s*(?:\+|or (?:higher|above|better|more|over)|"
+    r"and (?:up|above|higher|over))"
+)
+_RATING_SUFFIX_DOWN_RE = re.compile(
+    rf"\b(?P<num>{_RATING_NUM})\s*(?:or (?:lower|below|less|worse)|"
+    r"and (?:below|lower))"
+)
+_RATING_BETWEEN_RE = re.compile(
+    rf"\bbetween\s+(?P<lo>{_RATING_NUM})\s+(?:and|to|-|–)\s+(?P<hi>{_RATING_NUM})\b"
+)
+_RATING_CMP_RE = re.compile(
+    r"\b(?:"
+    r"(?P<gt>above|over|more than|greater than|higher than|exceeding|north of)|"
+    r"(?P<gte>at least|no less than|minimum(?: of)?|min(?: of)?)|"
+    r"(?P<lt>below|under|less than|lower than|south of)|"
+    r"(?P<lte>at most|no more than|maximum(?: of)?|max(?: of)?|up to)"
+    rf")\s+(?:a\s+)?(?:rating\s+of\s+|score\s+of\s+)?(?P<num>{_RATING_NUM})\b"
+)
+
+
+def _extract_rating(text: str) -> RatingRange | None:
+    """Parse "rated above 7.5", "at least 8", "below 6", "between 7 and 8", …
+
+    Inclusive vs exclusive is preserved: "above"/"over"/">" -> `gt`;
+    "at least"/"or higher"/">=" -> `gte`; "below"/"under"/"<" -> `lt`;
+    "at most"/"no more than"/"<=" -> `lte`. Word forms need a rating cue word
+    nearby so "under 90 minutes" / "over 2 hours" are never mistaken for a bound;
+    the ``>=``/``7.5+`` forms are unambiguous and only require a 0–10 value.
+    """
+    has_cue = _RATING_CUE_RE.search(text) is not None
+    rng = RatingRange()
+
+    def up(v: float, inclusive: bool) -> None:
+        if inclusive:
+            rng.gte = v if rng.gte is None else max(rng.gte, v)
+        else:
+            rng.gt = v if rng.gt is None else max(rng.gt, v)
+
+    def down(v: float, inclusive: bool) -> None:
+        if inclusive:
+            rng.lte = v if rng.lte is None else min(rng.lte, v)
+        else:
+            rng.lt = v if rng.lt is None else min(rng.lt, v)
+
+    for m in _RATING_OP_RE.finditer(text):
+        v = float(m.group("num"))
+        {">": lambda: up(v, False), ">=": lambda: up(v, True),
+         "<": lambda: down(v, False), "<=": lambda: down(v, True)}[m.group(1)]()
+
+    for m in _RATING_SUFFIX_UP_RE.finditer(text):
+        up(float(m.group("num")), True)
+    for m in _RATING_SUFFIX_DOWN_RE.finditer(text):
+        down(float(m.group("num")), True)
+
+    if has_cue:
+        bm = _RATING_BETWEEN_RE.search(text)
+        if bm:
+            lo, hi = sorted((float(bm.group("lo")), float(bm.group("hi"))))
+            up(lo, True)
+            down(hi, True)
+        for m in _RATING_CMP_RE.finditer(text):
+            v = float(m.group("num"))
+            if m.group("gt") is not None:
+                up(v, False)
+            elif m.group("gte") is not None:
+                up(v, True)
+            elif m.group("lt") is not None:
+                down(v, False)
+            elif m.group("lte") is not None:
+                down(v, True)
+
+    return rng if rng.is_set() else None
 
 
 def _phrase_hits(text: str, phrase: str) -> bool:
@@ -69,6 +158,8 @@ def _extract_avoid(text: str) -> tuple[list[str], str]:
     chars = list(text)
     for match in _AVOID_RE.finditer(text):
         word = match.group(1)
+        if word in _AVOID_STOPWORDS:  # part of "no more than X" — a rating bound
+            continue
         term: str | None = None
         if word in GENRE_VOCABULARY or word in MOOD_VOCABULARY or word in TONE_VOCABULARY:
             term = word
@@ -158,6 +249,10 @@ def parse_preferences(request_text: str) -> PreferenceObject:
     if release_period is not None:
         explicit.append("release_period")
 
+    rating = _extract_rating(base)  # pristine text: bounds are never `avoid`
+    if rating is not None:
+        explicit.append("rating")
+
     # a term can't be both wanted and avoided; the negation wins
     avoid_set = set(avoid)
     genres = [g for g in genres if g not in avoid_set]
@@ -173,6 +268,7 @@ def parse_preferences(request_text: str) -> PreferenceObject:
         intensity=intensity,
         language=language,
         release_period=release_period,
+        rating=rating,
         avoid=avoid,
         explicit_fields=_dedupe(explicit),
     )

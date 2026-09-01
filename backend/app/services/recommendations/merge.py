@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from app.schemas.preference import PreferenceObject
 
-_SCALAR_FIELDS = ("length", "intensity", "release_period")
+_SCALAR_FIELDS = ("length", "intensity", "release_period", "rating")
 _LIST_FIELDS = ("mood", "tone", "genres", "language")
 
 

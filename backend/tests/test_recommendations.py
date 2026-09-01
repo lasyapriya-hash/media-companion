@@ -46,10 +46,12 @@ class FakeClients:
 
     # -- TMDb surface -- #
     def discover(self, media_type, *, genres=None, language=None, year_from=None,
-                 year_to=None, limit=20):
+                 year_to=None, rating_gte=None, limit=20):
         if self._fail:
             raise RuntimeError("tmdb down")
-        self.discover_calls.append(("tmdb", media_type, tuple(genres or []), language))
+        self.discover_calls.append(
+            ("tmdb", media_type, tuple(genres or []), language, rating_gte)
+        )
         return [m for m in self._screen if m.type == media_type][:limit]
 
     def get_watch_providers(self, source_id, media_type, region="IN"):
@@ -425,7 +427,9 @@ def test_pleasant_request_ranks_feelgood_above_horror(client, wire):
 
 
 def test_dark_horror_request_still_favours_horror(client, wire):
-    """Negative polarity must not regress."""
+    """Negative polarity must not regress. "horror" is stated outright, so it is
+    now a HARD genre constraint: the cheerful Family/Comedy title is filtered
+    out entirely, not merely out-ranked."""
     wire["clients"] = FakeClients(
         screen=[
             _media("HR", genres=["Horror", "Thriller"], rating=6.4, popularity=50.0,
@@ -439,7 +443,7 @@ def test_dark_horror_request_still_favours_horror(client, wire):
     ).json()
     ids = [r["media"]["source_id"] for r in body["results"]]
     assert ids[0] == "HR"
-    assert ids.index("HR") < ids.index("FG")
+    assert "FG" not in ids  # explicit-genre hard filter removed the family romp
 
 
 def test_blank_request_ranks_reasonable_above_obscure(client, wire):
@@ -456,6 +460,174 @@ def test_blank_request_ranks_reasonable_above_obscure(client, wire):
     assert body["state"] == "results"
     ids = [r["media"]["source_id"] for r in body["results"]]
     assert ids[0] == "REASONABLE"  # not the obscure/low-rated horror
+
+
+# --------------------------------------------------------------------------- #
+# Hard constraints: explicit rating bound + explicit genre FILTER, never rank
+# (spec §7). Regression for "comedy rated above 7.5" -> 6.3 movie.
+# --------------------------------------------------------------------------- #
+def test_rating_bound_filters_out_violators(client, wire):
+    wire["clients"] = FakeClients(
+        screen=[
+            # violates "above 7.5" — must be removed, not merely down-ranked,
+            # even though it is the more novel / lower-profile pick
+            _media("LOW", genres=["Comedy"], rating=6.3, popularity=8.0,
+                   title="Animals", description="A scrappy low-key comedy."),
+            _media("OK", genres=["Comedy"], rating=8.1, popularity=70.0,
+                   title="Bright Room", description="A warm, sharp comedy."),
+        ]
+    )
+    body = client.post(
+        "/recommendations", json={"request": "a comedy movie rated above 7.5"}
+    ).json()
+    assert body["state"] == "results"
+    rc = body["preferences"]["rating"]
+    assert rc and rc["gt"] == 7.5  # exclusive bound survived extraction
+    ids = [r["media"]["source_id"] for r in body["results"]]
+    assert ids == ["OK"]
+    assert "LOW" not in ids
+    # "Why this" may only claim the bound for a candidate that meets it
+    assert "7.5" in body["results"][0]["reason"]
+
+
+def test_rating_bound_at_least_is_inclusive(client, wire):
+    wire["clients"] = FakeClients(
+        screen=[
+            _media("EXACT", genres=["Drama"], rating=8.0, title="On The Line"),
+            _media("UNDER", genres=["Drama"], rating=7.9, title="Just Short"),
+        ]
+    )
+    body = client.post(
+        "/recommendations", json={"request": "a drama movie rated at least 8"}
+    ).json()
+    ids = {r["media"]["source_id"] for r in body["results"]}
+    assert "EXACT" in ids and "UNDER" not in ids  # >= keeps the boundary value
+
+
+def test_romantic_movie_is_content_not_just_mood(client, wire):
+    wire["clients"] = FakeClients(
+        screen=[
+            _media("ROM", genres=["Romance", "Drama"], rating=7.4, popularity=40.0,
+                   title="Two Trains", description="A tender long-distance romance."),
+            _media("HOR", genres=["Horror", "Thriller"], rating=7.2, popularity=90.0,
+                   title="The Vestibule", description="A dread-soaked haunting."),
+        ]
+    )
+    body = client.post(
+        "/recommendations", json={"request": "a romantic movie"}
+    ).json()
+    p = body["preferences"]
+    assert "romance" in p["genres"]  # content signal, not only mood
+    assert "romantic" in p["mood"]
+    ids = {r["media"]["source_id"] for r in body["results"]}
+    assert "HOR" not in ids  # explicit-genre hard filter drops the horror pick
+    assert "ROM" in ids
+
+
+def test_romantic_rated_bound_filters_below_threshold(client, wire):
+    wire["clients"] = FakeClients(
+        screen=[
+            _media("GOOD", genres=["Romance"], rating=7.9, title="Paper Boats"),
+            _media("LOW", genres=["Romance"], rating=6.2, title="Shape Of My Heart"),
+        ]
+    )
+    body = client.post(
+        "/recommendations",
+        json={"request": "a romantic movie rated above 7.5"},
+    ).json()
+    ids = [r["media"]["source_id"] for r in body["results"]]
+    assert ids == ["GOOD"]  # the 6.2 romance is filtered, not just ranked lower
+
+
+def test_cozy_romantic_drama_rated_all_constraints_survive(client, wire):
+    wire["clients"] = FakeClients(
+        screen=[
+            _media("HIT", genres=["Romance", "Drama"], rating=8.2, popularity=30.0,
+                   title="Slow Light", description="A cosy, tender romance."),
+            _media("RATE_FAIL", genres=["Romance", "Drama"], rating=6.2,
+                   title="Hotel Desire", description="A steamy chamber romance."),
+            _media("GENRE_FAIL", genres=["Action"], rating=8.6, title="Blast Radius"),
+        ]
+    )
+    body = client.post(
+        "/recommendations",
+        json={"request": "a cozy romantic drama movie which has rating above 7.5"},
+    ).json()
+    p = body["preferences"]
+    assert {"romance", "drama"} <= set(p["genres"])
+    assert p["rating"]["gt"] == 7.5
+    ids = [r["media"]["source_id"] for r in body["results"]]
+    assert ids == ["HIT"]
+    assert "RATE_FAIL" not in ids and "GENRE_FAIL" not in ids
+
+
+def test_wholesome_love_story_keeps_romance_content(client, wire):
+    wire["clients"] = FakeClients(
+        screen=[
+            _media("LOVE", genres=["Romance"], rating=7.6, popularity=25.0,
+                   title="The Long Way", description="A gentle small-town love story."),
+            # wholesome + uplifting but NOT a love story -> must not satisfy it
+            _media("FAMILY", genres=["Family", "Animation"], rating=8.4,
+                   popularity=120.0, title="Moana",
+                   description="A spirited voyager saves her island."),
+        ]
+    )
+    body = client.post(
+        "/recommendations", json={"request": "a wholesome love story"}
+    ).json()
+    p = body["preferences"]
+    assert "romance" in p["genres"]
+    assert "wholesome" in p["mood"] and "uplifting" in p["tone"]
+    ids = {r["media"]["source_id"] for r in body["results"]}
+    assert "LOVE" in ids
+    assert "FAMILY" not in ids  # Family/uplifting alone is not a "love story"
+
+
+def test_not_scary_negative_constraint_unchanged(client, wire):
+    wire["clients"] = FakeClients(
+        screen=[
+            _media("SAFE", genres=["Comedy", "Family"], rating=7.0, title="Warm Bread"),
+            _media("SCARY", genres=["Horror"], rating=7.0, title="The Attic"),
+        ]
+    )
+    # "a fun movie which is not scary" — non-sparse (mood: fun), avoid: scary.
+    body = client.post(
+        "/recommendations",
+        json={"request": "a fun movie which is not scary"},
+    ).json()
+    assert body["state"] == "results"
+    assert "tense" in body["preferences"]["avoid"]  # "scary" -> canonical avoid
+    ids = {r["media"]["source_id"] for r in body["results"]}
+    assert "SCARY" not in ids and "SAFE" in ids
+
+
+def test_surprise_me_still_reasonable(client, wire):
+    wire["clients"] = FakeClients(
+        screen=[
+            _media("A", genres=["Drama"], rating=8.0, popularity=60.0, title="Anchor"),
+            _media("B", genres=["Drama"], rating=7.5, popularity=40.0, title="Barge"),
+        ]
+    )
+    body = client.post("/recommendations", json={"preferences": {}}).json()
+    assert body["state"] == "results"
+    assert len(body["results"]) >= 1
+    assert body["preferences"].get("rating") is None
+
+
+def test_unsatisfiable_rating_bound_returns_empty_not_a_violation(client, wire):
+    wire["clients"] = FakeClients(
+        screen=[
+            _media("A", genres=["Comedy"], rating=6.0, title="Middling"),
+            _media("B", genres=["Comedy"], rating=5.5, title="Lesser"),
+        ]
+    )
+    resp = client.post(
+        "/recommendations", json={"request": "a comedy movie rated above 9"}
+    )
+    assert resp.status_code == 200  # graceful, not a 503
+    body = resp.json()
+    assert body["state"] == "results"
+    assert body["results"] == []  # no violator is ever substituted in
 
 
 def test_zero_signal_scoring_uses_quality_prior_not_novelty():

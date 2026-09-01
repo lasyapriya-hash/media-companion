@@ -94,6 +94,11 @@ def build_candidates(
     """
     types = _target_types(prefs)
     year_from, year_to = period_years(prefs.release_period)
+    # Bias the pool toward an explicit lower rating bound; enforcement is the
+    # downstream hard filter, not this query (spec §7, §9.3).
+    rating_gte = None
+    if prefs.rating is not None:
+        rating_gte = prefs.rating.gte if prefs.rating.gte is not None else prefs.rating.gt
 
     screen_genres = prefs.genres or list(taste.favourite_genres[:3])
     book_subjects = prefs.genres or list(taste.favourite_genres[:3])
@@ -117,6 +122,7 @@ def build_candidates(
                         language=lang,
                         year_from=year_from,
                         year_to=year_to,
+                        rating_gte=rating_gte,
                         limit=20,
                     )
                 except Exception as exc:  # noqa: BLE001

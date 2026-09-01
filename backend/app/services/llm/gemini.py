@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import logging
 
-from app.schemas.preference import PreferenceObject, ReleaseWindow
+from app.schemas.preference import PreferenceObject, RatingRange, ReleaseWindow
 from app.services.normalization import MOOD_TAG_VOCABULARY
 from app.services.vocab import normalise_mood_tone
 
@@ -46,6 +46,12 @@ _RESPONSE_SCHEMA: dict = {
             "enum": ["recent", "classic"],
             "nullable": True,
         },
+        # Explicit numeric rating bound (0–10). "above 7.5" -> min 7.5,
+        # min_inclusive false; "at least 8" -> min 8, min_inclusive true.
+        "rating_min": {"type": "number", "nullable": True},
+        "rating_min_inclusive": {"type": "boolean", "nullable": True},
+        "rating_max": {"type": "number", "nullable": True},
+        "rating_max_inclusive": {"type": "boolean", "nullable": True},
         "avoid": {"type": "array", "items": {"type": "string"}},
         "explicit_fields": {"type": "array", "items": {"type": "string"}},
     },
@@ -58,6 +64,12 @@ _SYSTEM_INSTRUCTION = (
     "Extract only what the text supports; leave everything else empty or null. "
     "Do not invent genres or moods. "
     f"Prefer these mood words when they fit: {', '.join(MOOD_TAG_VOCABULARY)}. "
+    "A 'love story' / 'romance' / 'romantic' request is the Romance genre "
+    "(put 'Romance' in `genres`), not only a mood. "
+    "If the user states a numeric review-score bound (e.g. 'rated above 7.5', "
+    "'at least 8', 'below 6'), fill `rating_min`/`rating_max` on a 0–10 scale and "
+    "set the matching `*_inclusive` flag ('above'/'over' -> exclusive; 'at least'/"
+    "'or higher' -> inclusive); add 'rating' to `explicit_fields`. "
     "`explicit_fields` lists the field names the user stated outright (versus "
     "ones you inferred). `avoid` is for things to exclude. "
     "Respond with JSON only."
@@ -92,6 +104,26 @@ def _to_preference(data: dict) -> PreferenceObject:
     else:
         release_period = None
 
+    rmin = data.get("rating_min")
+    rmax = data.get("rating_max")
+    rating: RatingRange | None = None
+    if isinstance(rmin, (int, float)) or isinstance(rmax, (int, float)):
+        rating = RatingRange()
+        if isinstance(rmin, (int, float)):
+            v = max(0.0, min(10.0, float(rmin)))
+            if data.get("rating_min_inclusive") is False:
+                rating.gt = v
+            else:
+                rating.gte = v
+        if isinstance(rmax, (int, float)):
+            v = max(0.0, min(10.0, float(rmax)))
+            if data.get("rating_max_inclusive") is False:
+                rating.lt = v
+            else:
+                rating.lte = v
+        if not rating.is_set():
+            rating = None
+
     media_type = [
         m for m in _clean_strlist(data.get("media_type")) if m in ("movie", "series", "book")
     ]
@@ -116,6 +148,7 @@ def _to_preference(data: dict) -> PreferenceObject:
         intensity=intensity,
         language=_clean_strlist(data.get("language")),
         release_period=release_period,
+        rating=rating,
         avoid=_clean_strlist(data.get("avoid")),
         explicit_fields=_clean_strlist(data.get("explicit_fields")),
     )

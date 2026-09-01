@@ -36,7 +36,13 @@ from app.services.recommendations.candidates import broad_candidates, build_cand
 from app.services.recommendations.clarify import clarifying_question, is_decline
 from app.services.recommendations.merge import merge_preferences
 from app.services.recommendations.reasons import build_reason
-from app.services.recommendations.scoring import hits_avoid, passes_quality_floor, rank
+from app.services.recommendations.scoring import (
+    hits_avoid,
+    matches_explicit_genre,
+    passes_quality_floor,
+    rank,
+    satisfies_rating,
+)
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -74,12 +80,20 @@ def _filter_pool(
     prefs: PreferenceObject,
     excluded: set[tuple[str, str]],
 ) -> list[NormalizedMedia]:
+    """Apply every HARD constraint before anything is scored (spec §7).
+
+    `avoid`, an explicit numeric rating bound, and an explicitly-stated genre are
+    filters — a candidate that violates one is removed, never merely down-ranked
+    by mood / taste / novelty. Soft preferences are left for `rank`.
+    """
     return [
         it
         for it in items
         if (it.source, it.source_id) not in excluded
         and passes_quality_floor(it)
         and not hits_avoid(it, prefs.avoid)
+        and satisfies_rating(it, prefs.rating)
+        and matches_explicit_genre(it, prefs)
     ]
 
 
@@ -154,6 +168,8 @@ def _rank_and_finalize(
 
     if not pool:
         # spec §8.2: `ranking` still yields a list unless every source is down.
+        # The hard filters stay applied to the broad pull too — better an honest
+        # empty list than a candidate that violates a stated bound.
         broad = broad_candidates(prefs)
         if broad:
             all_failed = False

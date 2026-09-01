@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 from app.models.taste import TasteProfile
 from app.schemas.media import NormalizedMedia
-from app.schemas.preference import PreferenceObject, ReleaseWindow
+from app.schemas.preference import PreferenceObject, RatingRange, ReleaseWindow
 from app.services.recommendations.candidates import period_years
 from app.services.vocab import (
     GENRE_SYNONYMS,
@@ -85,6 +85,46 @@ def _mood_terms(prefs: PreferenceObject) -> list[str]:
 
 def passes_quality_floor(item: NormalizedMedia) -> bool:
     return item.external_rating is None or item.external_rating >= QUALITY_FLOOR
+
+
+def satisfies_rating(item: NormalizedMedia, rc: RatingRange | None) -> bool:
+    """A stated numeric bound is a HARD filter (spec §7), not a score nudge.
+
+    A candidate whose `external_rating` is unknown cannot be shown to satisfy an
+    explicit bound, so it is excluded when one is set.
+    """
+    if rc is None or not rc.is_set():
+        return True
+    r = item.external_rating
+    if r is None:
+        return False
+    if rc.gte is not None and r < rc.gte:
+        return False
+    if rc.gt is not None and r <= rc.gt:
+        return False
+    if rc.lte is not None and r > rc.lte:
+        return False
+    if rc.lt is not None and r >= rc.lt:
+        return False
+    return True
+
+
+def explicit_genres(prefs: PreferenceObject) -> set[str]:
+    """Canonical genres the user asked for *outright* (not inferred) — the set a
+    screen candidate must intersect to clear the hard genre filter."""
+    if "genres" not in (prefs.explicit_fields or []) or not prefs.genres:
+        return set()
+    return {_norm_genre(g) for g in prefs.genres}
+
+
+def matches_explicit_genre(item: NormalizedMedia, prefs: PreferenceObject) -> bool:
+    want = explicit_genres(prefs)
+    if not want:
+        return True
+    # Only screen media is hard-filtered on genre; books rank by overlap (spec §9.2).
+    if getattr(item.type, "value", item.type) not in ("movie", "series"):
+        return True
+    return bool(want & _cand_genres(item))
 
 
 def hits_avoid(item: NormalizedMedia, avoid: list[str]) -> bool:

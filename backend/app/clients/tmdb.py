@@ -190,6 +190,7 @@ class TMDbClient:
         language: str | None = None,
         year_from: int | None = None,
         year_to: int | None = None,
+        rating_gte: float | None = None,
         limit: int = 20,
     ) -> list[NormalizedMedia]:
         """Preference-driven candidate query via `/discover` (spec §8.2).
@@ -197,7 +198,10 @@ class TMDbClient:
         Genre *names* are resolved to TMDb ids; unknown names are dropped.
         `sort_by=popularity.desc` only shapes the candidate pool — ranking is
         done downstream and never uses popularity or rating as a sort key
-        (spec §9.3).
+        (spec §9.3). `rating_gte` biases the pool toward an explicit rating
+        constraint (paired with a vote-count floor so a single 10/10 vote
+        doesn't leak in); the constraint is still enforced downstream by the
+        hard filter, not here.
         """
         tmdb_media = _TMDB_PATH[media_type]
         gmap = self._genres(tmdb_media)
@@ -222,6 +226,9 @@ class TMDbClient:
             params[f"{date_field}.gte"] = f"{year_from}-01-01"
         if year_to:
             params[f"{date_field}.lte"] = f"{year_to}-12-31"
+        if rating_gte is not None:
+            params["vote_average.gte"] = rating_gte
+            params["vote_count.gte"] = 50
 
         data = self._get(f"/discover/{tmdb_media}", params)
         return [

@@ -179,6 +179,15 @@ export interface ReleaseWindow {
   to_year?: number | null;
 }
 
+/** An explicit numeric bound on `external_rating` (0–10). Inclusive vs
+ *  exclusive is carried in the field name: `gt`/`lt` are strict. */
+export interface RatingRange {
+  gte?: number | null;
+  gt?: number | null;
+  lte?: number | null;
+  lt?: number | null;
+}
+
 export interface PreferenceObject {
   media_type?: MediaType[] | null;
   mood: string[];
@@ -188,6 +197,7 @@ export interface PreferenceObject {
   intensity?: "low" | "medium" | "high" | null;
   language: string[];
   release_period?: ReleaseWindow | "recent" | "classic" | null;
+  rating?: RatingRange | null;
   avoid: string[];
   explicit_fields: string[];
 }
@@ -302,4 +312,19 @@ export function parsePreviewMedia(param: string | null): NormalizedMedia | null 
   } catch {
     return null;
   }
+}
+
+/**
+ * Read-only metadata enrichment for a not-yet-collected result. TMDb's list
+ * endpoints omit runtime and season/episode counts; this fetches them so the
+ * preview shows the same facts as the Collection detail page. Best-effort — the
+ * caller keeps the list-level fields on failure.
+ */
+export function getMediaDetails(
+  source: string,
+  sourceId: string,
+  type: MediaType,
+) {
+  const params = new URLSearchParams({ source, source_id: sourceId, type });
+  return request<NormalizedMedia>(`/media/details?${params.toString()}`);
 }

@@ -2,17 +2,59 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useMemo, useState } from "react";
-import { addToLibrary, parsePreviewMedia } from "@/lib/api";
+import { Suspense, useEffect, useMemo, useState } from "react";
+import {
+  addToLibrary,
+  getMediaDetails,
+  parsePreviewMedia,
+  type NormalizedMedia,
+} from "@/lib/api";
 import { MediaDetail } from "@/components/media";
+
+/** List endpoints omit runtime / season counts; fill them from the details
+ *  call when they're missing. Never overwrites a value the list already had. */
+const ENRICH_KEYS = [
+  "runtime_minutes",
+  "seasons",
+  "episodes",
+  "episode_runtime_minutes",
+  "length_bucket",
+  "description",
+] as const;
 
 function PreviewInner() {
   const params = useSearchParams();
   const router = useRouter();
-  const media = useMemo(() => parsePreviewMedia(params.get("m")), [params]);
+  const base = useMemo(() => parsePreviewMedia(params.get("m")), [params]);
+  const [media, setMedia] = useState<NormalizedMedia | null>(base);
 
   const [state, setState] = useState<"idle" | "adding" | "exists">("idle");
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setMedia(base);
+    if (!base) return;
+    const missing = ENRICH_KEYS.some((k) => base[k] == null);
+    if (!missing || (base.type !== "movie" && base.type !== "series")) return;
+    let live = true;
+    getMediaDetails(base.source, base.source_id, base.type)
+      .then((full) => {
+        if (!live) return;
+        setMedia((cur) => {
+          if (!cur) return cur;
+          const next: Record<string, unknown> = { ...cur };
+          const src = full as unknown as Record<string, unknown>;
+          for (const k of ENRICH_KEYS) {
+            if (next[k] == null && src[k] != null) next[k] = src[k];
+          }
+          return next as unknown as NormalizedMedia;
+        });
+      })
+      .catch(() => undefined); // best-effort; keep the list-level fields
+    return () => {
+      live = false;
+    };
+  }, [base]);
 
   if (!media) {
     return (

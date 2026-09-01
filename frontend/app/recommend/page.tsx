@@ -22,6 +22,17 @@ const EXAMPLES = [
   "A bittersweet slow-burn drama, ideally not too long",
 ];
 
+function ratingPhrase(r: PreferenceObject["rating"]): string | null {
+  if (!r) return null;
+  const g = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(1));
+  const lo = r.gte != null ? `≥ ${g(r.gte)}` : r.gt != null ? `> ${g(r.gt)}` : null;
+  const hi = r.lte != null ? `≤ ${g(r.lte)}` : r.lt != null ? `< ${g(r.lt)}` : null;
+  if (lo && hi) return `rated ${g(r.gte ?? r.gt!)}–${g(r.lte ?? r.lt!)}`;
+  if (lo) return `rated ${lo}`;
+  if (hi) return `rated ${hi}`;
+  return null;
+}
+
 function interpretation(p: PreferenceObject): string {
   const parts: string[] = [];
   if (p.media_type && p.media_type.length) parts.push(p.media_type.join(" / "));
@@ -31,6 +42,8 @@ function interpretation(p: PreferenceObject): string {
   if (p.length) parts.push(`${p.length} length`);
   if (p.language.length) parts.push(p.language.join(", "));
   if (typeof p.release_period === "string") parts.push(p.release_period);
+  const rating = ratingPhrase(p.rating);
+  if (rating) parts.push(rating);
   if (p.avoid.length) parts.push(`avoiding ${p.avoid.join(", ")}`);
   return parts.length ? parts.join(" · ") : "an open-ended request";
 }
