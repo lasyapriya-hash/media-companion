@@ -1,8 +1,8 @@
 """Unified library: add items, list them, and edit status/rating/review/
 progress (spec §5.1, FR1, FR2).
 
-Taste-profile recompute on rating/status change (FR9) is wired in Phase 3;
-the seam is marked below.
+Taste-profile recompute on rating/status change (FR9, spec §6.3) runs after
+those mutations commit — see the `taste_profile.recompute` calls below.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from app.models.library import LibraryEntry, SeriesProgress
 from app.models.media import MediaItem
 from app.schemas.library import UpdateEntryRequest, UpdateProgressRequest
 from app.schemas.media import NormalizedMedia
-from app.services import mood_tags
+from app.services import mood_tags, taste_profile
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -155,6 +155,8 @@ def add_to_library(
     if media.type == MediaType.series:
         db.add(SeriesProgress(library_entry_id=entry.id))
     db.commit()
+    # A new entry carries a status, so the derived profile may shift (FR9).
+    taste_profile.recompute(db)
     db.refresh(entry)
     return entry
 
@@ -197,8 +199,9 @@ def update_entry(
         entry.favourite = patch.favourite
 
     db.commit()
+    if {"status", "rating"} & fields:
+        taste_profile.recompute(db)
     db.refresh(entry)
-    # Phase 3: recompute taste profile here when status or rating changed (FR9).
     return entry
 
 

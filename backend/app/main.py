@@ -12,6 +12,7 @@ from sqlalchemy import text
 
 from app.api import library as library_api
 from app.api import search as search_api
+from app.api import taste as taste_api
 from app.config import get_settings
 from app.db import engine
 
@@ -31,6 +32,7 @@ app.add_middleware(
 
 app.include_router(search_api.router)
 app.include_router(library_api.router)
+app.include_router(taste_api.router)
 
 
 @app.get("/health")
