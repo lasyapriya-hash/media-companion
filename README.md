@@ -39,7 +39,8 @@ createdb media_companion        # once
   (TMDb tests skip unless `TMDB_API_KEY` is set in `backend/.env`).
 - Needs local databases `media_companion` and `media_companion_test`
   (`createdb media_companion media_companion_test`).
-- Backfill mood tags once `ANTHROPIC_API_KEY` is set:
+- Backfill mood tags once an LLM provider is configured (`LLM_PROVIDER=gemini`
+  + `GEMINI_API_KEY`):
   `.venv/bin/python -m app.scripts.backfill_mood_tags`
 
 ### Frontend
@@ -59,23 +60,29 @@ favourite and, for series, season/episode progress.
 
 - **Backend + Postgres:** Render blueprint at `backend/render.yaml`
   (or Railway using `backend/Dockerfile`). The start hook
-  (`backend/start.sh`) runs `alembic upgrade head` before serving.
+  (`backend/start.sh`, tracked executable) runs `alembic upgrade head`
+  before serving.
 - **Frontend:** Vercel, root directory `frontend/`. Set
   `NEXT_PUBLIC_API_BASE_URL` to the deployed backend URL.
-- Set `FRONTEND_ORIGIN` on the backend to the deployed Vercel URL for CORS.
+- Set `FRONTEND_ORIGIN` on the backend to the deployed frontend URL for CORS.
 
-### Required environment variables
+The LLM provider is **Gemini**, and it is optional: with no `GEMINI_API_KEY`
+the app still runs — preference extraction uses a deterministic parser and
+`mood_tags` classification is skipped. There is no Anthropic dependency.
 
-| Where | Variable | Purpose |
-|---|---|---|
-| Backend | `DATABASE_URL` | Postgres connection string |
-| Backend | `ENV` | `production` in deploys |
-| Backend | `FRONTEND_ORIGIN` | allowed CORS origin(s), comma-separated |
-| Backend | `TMDB_API_KEY` | TMDb v3 API key (movie/series search) |
-| Backend | `GOOGLE_BOOKS_API_KEY` | optional; Google Books fallback (Phase 6) |
-| Backend | `ANTHROPIC_API_KEY` | optional; enables mood_tags on add. Not required for library use. |
-| Backend | `MOOD_TAGS_MODEL` | optional; overrides the mood-tag classification model |
-| Frontend | `NEXT_PUBLIC_API_BASE_URL` | backend base URL |
+### Environment variables
+
+| Where | Variable | Required? | Purpose |
+|---|---|---|---|
+| Backend | `DATABASE_URL` | required | Postgres connection string (Render/Railway supply this) |
+| Backend | `ENV` | required | `production` in deploys |
+| Backend | `FRONTEND_ORIGIN` | required | allowed CORS origin(s), comma-separated — the deployed frontend URL |
+| Backend | `TMDB_API_KEY` | required | TMDb v3 API key — movie/series search, metadata, watch providers |
+| Backend | `LLM_PROVIDER` | optional | `gemini` (default) or `none` to disable the LLM entirely |
+| Backend | `GEMINI_API_KEY` | optional | Google AI Studio key. Enables LLM preference extraction and `mood_tags`; without it a deterministic parser runs and `mood_tags` are skipped |
+| Backend | `GEMINI_MODEL` | optional | overrides the Gemini model (default `gemini-2.5-flash`) |
+| Backend | `GOOGLE_BOOKS_API_KEY` | optional | book-search **fallback** (Open Library is primary); a key just raises the rate limit |
+| Frontend | `NEXT_PUBLIC_API_BASE_URL` | required | backend base URL (the only frontend var; not a secret) |
 
 No secret is ever committed or shipped to the browser (spec FR8).
 
@@ -83,9 +90,9 @@ No secret is ever committed or shipped to the browser (spec FR8).
 
 - [x] Phase 0 — live skeleton (backend + frontend + Postgres + migrations + CORS)
 - [x] Phase 1 — data model + external ingestion (schema migration; TMDb + Open Library clients; normalization)
-- [x] Phase 2 — library CRUD + UI (search/library endpoints; add + status/rating/review/favourite + series progress; mood_tags feature-gated on ANTHROPIC_API_KEY with backfill script)
-- [ ] Phase 3 — taste profile
-- [ ] Phase 4 — single-turn recommendations (MVP deploy checkpoint)
-- [ ] Phase 5 — clarification turn
-- [ ] Phase 6 — robustness & completeness
+- [x] Phase 2 — library CRUD + UI (search/library endpoints; add + status/rating/review/favourite + series progress; `mood_tags` feature-gated on the LLM provider, with backfill script)
+- [x] Phase 3 — taste profile (derived record recomputed on every rating/status change)
+- [x] Phase 4 — single-turn recommendations (Gemini/deterministic-fallback preference extraction; deterministic candidate retrieval, scoring, ranking, reasons)
+- [x] Phase 5 — clarification turn (one templated question when the request is sparse; session state machine)
+- [x] Phase 6 — robustness & completeness (`mood_tags` on Gemini — no Anthropic; Google Books fallback; external-call retry/typed fallbacks; availability/book-link polish; scoring-penalty refinement)
 - [ ] Phase 7 — acceptance pass & deploy hardening
