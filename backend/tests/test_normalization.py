@@ -116,6 +116,40 @@ def test_normalize_tmdb_series_details_sets_seasons_episodes_bucket():
     assert media.episode_runtime_minutes == 47
     assert media.length_bucket == LengthBucket.medium  # 30–50
     assert media.runtime_minutes is None
+    assert media.season_episode_counts is None  # no `seasons` array in this payload
+
+
+def test_normalize_tmdb_series_details_extracts_season_episode_counts():
+    """Real TMDb `/tv/{id}` shape (verified live against Breaking Bad,
+    id 1396): `seasons` includes season 0 ("Specials") alongside the numbered
+    ones — extraction keeps it, callers doing progress tracking filter it."""
+    raw = {
+        "id": 1396,
+        "name": "Breaking Bad",
+        "overview": "...",
+        "genres": [{"id": 18, "name": "Drama"}],
+        "original_language": "en",
+        "first_air_date": "2008-01-20",
+        "vote_average": 8.9,
+        "poster_path": "/bb.jpg",
+        "number_of_seasons": 5,
+        "number_of_episodes": 62,
+        "episode_run_time": [47],
+        "seasons": [
+            {"season_number": 0, "name": "Specials", "episode_count": 9},
+            {"season_number": 1, "name": "Season 1", "episode_count": 7},
+            {"season_number": 2, "name": "Season 2", "episode_count": 13},
+            {"season_number": 3, "name": "Season 3", "episode_count": 13},
+            {"season_number": 4, "name": "Season 4", "episode_count": 13},
+            {"season_number": 5, "name": "Season 5", "episode_count": 16},
+        ],
+    }
+    media = normalize_tmdb_details(raw, "series")
+    assert media.season_episode_counts is not None
+    by_number = {s.season_number: s.episode_count for s in media.season_episode_counts}
+    assert by_number == {0: 9, 1: 7, 2: 13, 3: 13, 4: 13, 5: 16}
+    specials = next(s for s in media.season_episode_counts if s.season_number == 0)
+    assert specials.name == "Specials"
 
 
 def test_parse_watch_providers_available_for_region_in():

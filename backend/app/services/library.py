@@ -32,6 +32,7 @@ _MERGE_FIELDS = (
     "seasons",
     "episodes",
     "episode_runtime_minutes",
+    "season_episode_counts",
     "author",
     "page_count",
 )
@@ -54,6 +55,10 @@ class EntryNotFound(LibraryError):
 
 class NotASeries(LibraryError):
     pass
+
+
+class InvalidProgress(LibraryError):
+    """current_season/current_episode outside the series' known bounds."""
 
 
 # --------------------------------------------------------------------------- #
@@ -124,6 +129,11 @@ def _get_or_create_media_item(db: Session, item: NormalizedMedia) -> MediaItem:
         seasons=enriched.seasons,
         episodes=enriched.episodes,
         episode_runtime_minutes=enriched.episode_runtime_minutes,
+        season_episode_counts=(
+            [s.model_dump() for s in enriched.season_episode_counts]
+            if enriched.season_episode_counts
+            else None
+        ),
         author=enriched.author,
         page_count=enriched.page_count,
         mood_tags=tags,
@@ -218,6 +228,24 @@ def remove_from_library(db: Session, entry_id: uuid.UUID) -> None:
     taste_profile.recompute(db)
 
 
+def _regular_season_episode_counts(media: MediaItem) -> dict[int, int] | None:
+    """season_number -> episode_count, excluding season 0 ("Specials") — the
+    same aggregate TMDb's own `number_of_seasons`/`number_of_episodes` already
+    excludes (spec §6.1). `None` when this series has no season data cached
+    yet (e.g. added before this feature, or a non-TMDb source) — callers must
+    skip bound-checking rather than reject on missing data (never fabricate a
+    bound we can't verify)."""
+    counts = media.season_episode_counts
+    if not counts:
+        return None
+    regular = {
+        s["season_number"]: s["episode_count"]
+        for s in counts
+        if isinstance(s, dict) and s.get("season_number", -1) >= 1
+    }
+    return regular or None
+
+
 def update_progress(
     db: Session, entry_id: uuid.UUID, patch: UpdateProgressRequest
 ) -> LibraryEntry:
@@ -227,10 +255,37 @@ def update_progress(
 
     progress = entry.progress or SeriesProgress(library_entry_id=entry.id)
     fields = patch.model_fields_set
-    if "seasons_completed" in fields and patch.seasons_completed is not None:
-        progress.seasons_completed = patch.seasons_completed
+
+    # Validate against the state this patch would produce, not just the
+    # fields it touches — e.g. an episode-only update must still be checked
+    # against whichever season is (or remains) current.
+    next_season = (
+        patch.current_season if "current_season" in fields else progress.current_season
+    )
+    next_episode = (
+        patch.current_episode if "current_episode" in fields else progress.current_episode
+    )
+    regular = _regular_season_episode_counts(entry.media)
+    if regular is not None and next_season is not None:
+        if next_season not in regular:
+            raise InvalidProgress(
+                f"season {next_season} does not exist for this series"
+            )
+        if next_episode is not None and not (1 <= next_episode <= regular[next_season]):
+            raise InvalidProgress(
+                f"season {next_season} has {regular[next_season]} episodes; "
+                f"episode {next_episode} is out of range"
+            )
+
     if "current_season" in fields:
         progress.current_season = patch.current_season
+        # Derived, not client-controlled, whenever current_season moves — the
+        # two can never again disagree (spec: no contradictory state).
+        progress.seasons_completed = max((patch.current_season or 1) - 1, 0)
+    elif "seasons_completed" in fields and patch.seasons_completed is not None:
+        # Back-compat: a caller setting seasons_completed alone, without
+        # touching current_season, keeps the old direct-passthrough behavior.
+        progress.seasons_completed = patch.seasons_completed
     if "current_episode" in fields:
         progress.current_episode = patch.current_episode
 

@@ -54,6 +54,31 @@ def test_series_details_returns_season_and_episode_counts(client, monkeypatch):
     assert body["seasons"] == 5 and body["episodes"] == 62
 
 
+def test_series_details_returns_per_season_episode_counts(client, monkeypatch):
+    """Progress UI needs season_number -> episode_count to constrain input."""
+    per_season = [
+        {"season_number": 0, "name": "Specials", "episode_count": 9},
+        {"season_number": 1, "name": "Season 1", "episode_count": 7},
+        {"season_number": 2, "name": "Season 2", "episode_count": 13},
+    ]
+    monkeypatch.setattr(
+        "app.api.media.tmdb_client",
+        lambda: type("F", (), {
+            "get_details": lambda self, s, m: _series_details(
+                season_episode_counts=per_season
+            )
+        })(),
+    )
+    resp = client.get(
+        "/media/details", params={"source": "tmdb", "source_id": "1396", "type": "series"}
+    )
+    assert resp.status_code == 200
+    body = resp.json()["season_episode_counts"]
+    assert {(s["season_number"], s["episode_count"]) for s in body} == {
+        (0, 9), (1, 7), (2, 13)
+    }
+
+
 def test_details_never_invents_missing_values(client, monkeypatch):
     """A details payload with no runtime must come back as null, not a guess."""
     monkeypatch.setattr(

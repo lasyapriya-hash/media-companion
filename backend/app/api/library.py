@@ -71,3 +71,5 @@ def update_item_progress(
         raise HTTPException(
             status_code=400, detail="Progress tracking applies to series only"
         ) from exc
+    except svc.InvalidProgress as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

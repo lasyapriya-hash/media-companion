@@ -212,6 +212,107 @@ def test_progress_rejected_for_non_series(client):
 
 
 # --------------------------------------------------------------------------- #
+# Progress boundaries + seasons_completed derivation (series progress UX fix)
+# --------------------------------------------------------------------------- #
+_BB_SEASONS = [
+    {"season_number": 0, "name": "Specials", "episode_count": 9},
+    {"season_number": 1, "name": "Season 1", "episode_count": 7},
+    {"season_number": 2, "name": "Season 2", "episode_count": 13},
+    {"season_number": 3, "name": "Season 3", "episode_count": 13},
+    {"season_number": 4, "name": "Season 4", "episode_count": 13},
+    {"season_number": 5, "name": "Season 5", "episode_count": 16},
+]
+
+
+def _series_with_seasons(**over):
+    return _series(season_episode_counts=_BB_SEASONS, **over)
+
+
+def test_seasons_completed_is_derived_from_current_season(client):
+    """Sending current_season always recomputes seasons_completed = season - 1,
+    regardless of any (even wrong) seasons_completed the caller also sends."""
+    entry_id = client.post("/library", json={"item": _series_with_seasons()}).json()["id"]
+    resp = client.put(
+        f"/library/{entry_id}/progress",
+        json={"seasons_completed": 99, "current_season": 3, "current_episode": 4},
+    )
+    assert resp.status_code == 200, resp.text
+    prog = resp.json()["progress"]
+    assert prog["seasons_completed"] == 2  # derived (3 - 1), NOT the sent 99
+    assert prog["current_season"] == 3
+    assert prog["current_episode"] == 4
+
+
+def test_seasons_completed_direct_update_without_current_season_still_works(client):
+    """Back-compat: a caller that never touches current_season keeps the old
+    direct-passthrough behavior for seasons_completed."""
+    entry_id = client.post("/library", json={"item": _series()}).json()["id"]
+    resp = client.put(f"/library/{entry_id}/progress", json={"seasons_completed": 4})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["progress"]["seasons_completed"] == 4
+
+
+def test_episode_beyond_season_count_is_rejected(client):
+    entry_id = client.post("/library", json={"item": _series_with_seasons()}).json()["id"]
+    resp = client.put(
+        f"/library/{entry_id}/progress",
+        json={"current_season": 5, "current_episode": 13},  # season 5 has only 16... ok
+    )
+    assert resp.status_code == 200
+    bad = client.put(
+        f"/library/{entry_id}/progress",
+        json={"current_season": 1, "current_episode": 8},  # season 1 has only 7
+    )
+    assert bad.status_code == 400
+    # the earlier valid save must be untouched
+    reread = client.get(f"/library/{entry_id}").json()["progress"]
+    assert reread["current_season"] == 5 and reread["current_episode"] == 13
+
+
+def test_season_beyond_series_total_is_rejected(client):
+    entry_id = client.post("/library", json={"item": _series_with_seasons()}).json()["id"]
+    resp = client.put(
+        f"/library/{entry_id}/progress", json={"current_season": 6, "current_episode": 1}
+    )
+    assert resp.status_code == 400
+
+
+def test_season_zero_is_rejected_for_progress(client):
+    """Season 0 ("Specials") is real TMDb data but excluded from progress
+    tracking — same aggregate TMDb's own number_of_seasons already excludes."""
+    entry_id = client.post("/library", json={"item": _series_with_seasons()}).json()["id"]
+    resp = client.put(
+        f"/library/{entry_id}/progress", json={"current_season": 0, "current_episode": 1}
+    )
+    assert resp.status_code == 400
+
+
+def test_episode_only_update_validated_against_existing_season(client):
+    entry_id = client.post("/library", json={"item": _series_with_seasons()}).json()["id"]
+    client.put(
+        f"/library/{entry_id}/progress",
+        json={"current_season": 2, "current_episode": 1},
+    )
+    # season 2 has 13 episodes — sending only current_episode must still be
+    # checked against the season already on record.
+    bad = client.put(f"/library/{entry_id}/progress", json={"current_episode": 20})
+    assert bad.status_code == 400
+    ok = client.put(f"/library/{entry_id}/progress", json={"current_episode": 13})
+    assert ok.status_code == 200
+
+
+def test_progress_without_season_data_is_not_blocked(client):
+    """Legacy/unenriched entries (no season_episode_counts cached) must not be
+    hard-blocked — an unverifiable bound is skipped, never fabricated."""
+    entry_id = client.post("/library", json={"item": _series()}).json()["id"]
+    resp = client.put(
+        f"/library/{entry_id}/progress",
+        json={"current_season": 40, "current_episode": 999},
+    )
+    assert resp.status_code == 200
+
+
+# --------------------------------------------------------------------------- #
 # Listing + filters
 # --------------------------------------------------------------------------- #
 def test_list_filters_by_status_and_type(client):

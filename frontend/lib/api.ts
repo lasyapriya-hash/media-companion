@@ -22,6 +22,16 @@ export interface HealthResponse {
   database: string;
 }
 
+/** One entry from TMDb's per-series `seasons` array. `season_number === 0` is
+ * TMDb's "Specials" bucket — real data, but excluded from progress tracking
+ * (season selection, seasons_completed, advance/rollover) wherever that's
+ * relevant; TMDb's own aggregate `seasons`/`episodes` totals exclude it too. */
+export interface SeasonInfo {
+  season_number: number;
+  name?: string | null;
+  episode_count: number;
+}
+
 export interface NormalizedMedia {
   source: string;
   source_id: string;
@@ -37,6 +47,7 @@ export interface NormalizedMedia {
   seasons?: number | null;
   episodes?: number | null;
   episode_runtime_minutes?: number | null;
+  season_episode_counts?: SeasonInfo[] | null;
   author?: string | null;
   page_count?: number | null;
   length_bucket?: LengthBucket | null;
@@ -60,6 +71,7 @@ export interface MediaItemOut {
   seasons?: number | null;
   episodes?: number | null;
   episode_runtime_minutes?: number | null;
+  season_episode_counts?: SeasonInfo[] | null;
   author?: string | null;
   page_count?: number | null;
   mood_tags: string[];

@@ -7,7 +7,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.enums import LibraryStatus
-from app.schemas.media import LengthBucket, NormalizedMedia
+from app.schemas.media import LengthBucket, NormalizedMedia, SeasonInfo
 
 
 # --------------------------------------------------------------------------- #
@@ -77,6 +77,7 @@ class MediaItemOut(BaseModel):
     seasons: int | None = None
     episodes: int | None = None
     episode_runtime_minutes: int | None = None
+    season_episode_counts: list[SeasonInfo] | None = None
     author: str | None = None
     page_count: int | None = None
     mood_tags: list[str] = Field(default_factory=list)

@@ -7,7 +7,7 @@ from __future__ import annotations
 import httpx
 
 from app.clients.base import DEFAULT_TIMEOUT, request_json
-from app.schemas.media import NormalizedMedia, WatchAvailability
+from app.schemas.media import NormalizedMedia, SeasonInfo, WatchAvailability
 from app.services.normalization import length_bucket
 
 TMDB_BASE = "https://api.themoviedb.org/3"
@@ -34,6 +34,26 @@ def _num(x: object) -> float | None:
 
 def _poster(path: str | None) -> str | None:
     return f"{IMAGE_BASE}{path}" if path else None
+
+
+def _season_episode_counts(payload: dict) -> list[SeasonInfo] | None:
+    """Parse `/tv/{id}`'s own `seasons` array — already present in a response
+    this client already fetches, no extra call. Includes season 0 ("Specials")
+    for completeness; callers doing progress tracking filter it out (spec §6.1:
+    TMDb's own `number_of_seasons`/`number_of_episodes` already exclude it)."""
+    seasons = payload.get("seasons")
+    if not isinstance(seasons, list):
+        return None
+    out = [
+        SeasonInfo(
+            season_number=s["season_number"],
+            name=s.get("name"),
+            episode_count=s.get("episode_count") or 0,
+        )
+        for s in seasons
+        if isinstance(s, dict) and isinstance(s.get("season_number"), int)
+    ]
+    return out or None
 
 
 # --------------------------------------------------------------------------- #
@@ -91,6 +111,7 @@ def normalize_tmdb_details(payload: dict, media_type: str) -> NormalizedMedia:
         seasons=payload.get("number_of_seasons"),
         episodes=payload.get("number_of_episodes"),
         episode_runtime_minutes=ep_runtime,
+        season_episode_counts=_season_episode_counts(payload),
     )
     media.length_bucket = length_bucket(
         "series", episode_runtime_minutes=ep_runtime

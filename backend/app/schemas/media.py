@@ -13,6 +13,20 @@ class LengthBucket(str, enum.Enum):
     long = "long"
 
 
+class SeasonInfo(BaseModel):
+    """One entry from TMDb's per-series `seasons` array (spec §6.1).
+
+    `season_number == 0` is TMDb's "Specials" bucket — included here for
+    completeness, but excluded from progress tracking (season selection,
+    seasons_completed, advance/rollover) wherever that's relevant; TMDb's own
+    aggregate `number_of_seasons`/`number_of_episodes` already exclude it too.
+    """
+
+    season_number: int
+    name: str | None = None
+    episode_count: int
+
+
 class NormalizedMedia(BaseModel):
     """One search/discovery result in the unified shape."""
 
@@ -34,6 +48,7 @@ class NormalizedMedia(BaseModel):
     seasons: int | None = None
     episodes: int | None = None
     episode_runtime_minutes: int | None = None
+    season_episode_counts: list[SeasonInfo] | None = None
     # Book
     author: str | None = None
     page_count: int | None = None

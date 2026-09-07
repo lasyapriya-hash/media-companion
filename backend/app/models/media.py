@@ -46,6 +46,9 @@ class MediaItem(Base):
     seasons: Mapped[int | None] = mapped_column(sa.Integer)
     episodes: Mapped[int | None] = mapped_column(sa.Integer)
     episode_runtime_minutes: Mapped[int | None] = mapped_column(sa.Integer)
+    # [{"season_number": int, "name": str | None, "episode_count": int}, ...],
+    # including season 0 ("Specials") — consumers filter it per spec §6.1.
+    season_episode_counts: Mapped[list | None] = mapped_column(JSONB)
     # Book
     author: Mapped[str | None] = mapped_column(sa.Text)
     page_count: Mapped[int | None] = mapped_column(sa.Integer)
