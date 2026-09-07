@@ -103,7 +103,16 @@ def build_candidates(
     screen_genres = prefs.genres or list(taste.favourite_genres[:3])
     book_subjects = prefs.genres or list(taste.favourite_genres[:3])
     pref_lang_codes = [c for c in (language_to_code(l) for l in prefs.language) if c]
-    screen_langs: list[str | None] = pref_lang_codes[:2] or [None]
+    language_explicit = "language" in (prefs.explicit_fields or []) and bool(prefs.language)
+    if language_explicit and not pref_lang_codes:
+        # An explicit language was stated but none of it resolved to a known
+        # code (spec §7) — never silently fall back to an unrestricted query.
+        # `matches_explicit_language` downstream would reject every screen
+        # candidate anyway, so making zero calls here just skips work that's
+        # guaranteed to be discarded, rather than masking the gap.
+        screen_langs: list[str | None] = []
+    else:
+        screen_langs = pref_lang_codes[:2] or [None]
     ol_lang = next(
         (c for c in (language_to_ol_code(l) for l in prefs.language) if c), None
     )

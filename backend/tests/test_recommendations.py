@@ -10,6 +10,7 @@ import pytest
 
 from app.schemas.media import NormalizedMedia, WatchAvailability
 from app.schemas.preference import PreferenceObject
+from app.services.llm.base import GeminiRecommendation, GeminiSuggestion
 
 
 # --------------------------------------------------------------------------- #
@@ -37,12 +38,16 @@ def _media(source_id, *, type="movie", title="Untitled", genres=None, language="
 class FakeClients:
     """Stands in for both `tmdb_client()` and `openlibrary_client()`."""
 
-    def __init__(self, screen=None, books=None, providers=None, fail=False):
+    def __init__(self, screen=None, books=None, providers=None, fail=False,
+                 search_results=None):
         self._screen = screen or []
         self._books = books or []
         self._providers = providers or {}
         self._fail = fail
+        # Gemini-pipeline resolution: exact suggestion title -> search results.
+        self._search_results = search_results or {}
         self.discover_calls: list[tuple] = []
+        self.search_calls: list[tuple] = []
 
     # -- TMDb surface -- #
     def discover(self, media_type, *, genres=None, language=None, year_from=None,
@@ -54,18 +59,33 @@ class FakeClients:
         )
         return [m for m in self._screen if m.type == media_type][:limit]
 
+    def search(self, query, media_type=None, limit=10):
+        if self._fail:
+            raise RuntimeError("tmdb down")
+        self.search_calls.append(("tmdb_search", query, media_type))
+        results = self._search_results.get(query, [])
+        if media_type:
+            results = [m for m in results if m.type == media_type]
+        return list(results[:limit])
+
     def get_watch_providers(self, source_id, media_type, region="IN"):
         return self._providers.get(
             str(source_id), WatchAvailability(region="IN", status="unknown")
         )
 
     # -- Open Library / Google Books surface -- #
-    # (same object; `discover` is dispatched by kwargs shape)
+    # (same object; `discover`/`search` are dispatched by kwargs shape)
     def ol_discover(self, *, subjects=None, language=None, limit=20):
         if self._fail:
             raise RuntimeError("ol down")
         self.discover_calls.append(("ol", tuple(subjects or []), language))
         return list(self._books[:limit])
+
+    def ol_search(self, query, limit=10):
+        if self._fail:
+            raise RuntimeError("ol down")
+        self.search_calls.append(("ol_search", query, "book"))
+        return list(self._search_results.get(query, [])[:limit])
 
     def gb_discover(self, *, subjects=None, language=None, limit=20):
         if self._fail:
@@ -79,10 +99,23 @@ class FakeClients:
         return list(self._books[:limit])
 
 
+class SpyRecommender:
+    """Fake `GeminiRecommender`: returns a fixed `GeminiRecommendation` (or
+    `None`, to simulate Gemini failing) and records every call."""
+
+    def __init__(self, result):
+        self.result = result
+        self.calls: list[str] = []
+
+    def recommend(self, request_text, *, taste_context=""):
+        self.calls.append(request_text)
+        return self.result
+
+
 @pytest.fixture()
 def wire(monkeypatch):
-    """Install fake clients + a controllable extractor. Returns a configy setter."""
-    state: dict = {"clients": FakeClients(), "extractor": None}
+    """Install fake clients + a controllable extractor/recommender."""
+    state: dict = {"clients": FakeClients(), "extractor": None, "recommender": None}
 
     def tmdb():
         return state["clients"]
@@ -90,6 +123,9 @@ def wire(monkeypatch):
     class _OL:
         def discover(self, **kw):
             return state["clients"].ol_discover(**kw)
+
+        def search(self, query, limit=10):
+            return state["clients"].ol_search(query, limit)
 
     class _GB:
         def discover(self, **kw):
@@ -106,20 +142,21 @@ def wire(monkeypatch):
         "app.services.recommendations.candidates.google_books_client", lambda: _GB()
     )
     monkeypatch.setattr("app.services.recommendations.tmdb_client", tmdb)
+    monkeypatch.setattr("app.services.recommendations.gemini_pipeline.tmdb_client", tmdb)
     monkeypatch.setattr(
-        "app.services.recommendations.get_extractor", lambda: state["extractor"]
+        "app.services.recommendations.gemini_pipeline.openlibrary_client", lambda: _OL()
+    )
+    monkeypatch.setattr(
+        "app.services.recommendations.gemini_pipeline.google_books_client", lambda: _GB()
+    )
+    # `get_extractor`/`GeminiExtractor` are no longer called by the live
+    # orchestrator (Phase 9: `get_recommender` is the primary path) — kept
+    # importable for `test_llm_extraction.py`'s direct unit tests, but there is
+    # nothing in this module's namespace to patch any more.
+    monkeypatch.setattr(
+        "app.services.recommendations.get_recommender", lambda: state["recommender"]
     )
     return state
-
-
-class SpyExtractor:
-    def __init__(self, result):
-        self.result = result
-        self.calls: list[str] = []
-
-    def extract(self, request_text):
-        self.calls.append(request_text)
-        return self.result
 
 
 # --------------------------------------------------------------------------- #
@@ -160,7 +197,7 @@ def test_llm_disabled_still_returns_list_via_fallback(client, wire):
     wire["clients"] = FakeClients(
         screen=[_media("A", genres=["Drama"]), _media("B", genres=["Drama"])]
     )
-    wire["extractor"] = None  # explicit: no LLM
+    wire["recommender"] = None  # explicit: no LLM (also the fixture default)
     resp = client.post("/recommendations", json={"request": "a thoughtful drama"})
     assert resp.status_code == 200
     body = resp.json()
@@ -172,8 +209,10 @@ def test_llm_disabled_still_returns_list_via_fallback(client, wire):
 # Pre-structured `preferences` bypasses the LLM entirely
 # --------------------------------------------------------------------------- #
 def test_prestructured_preferences_bypass_llm(client, wire):
-    spy = SpyExtractor(PreferenceObject(genres=["should-not-be-used"]))
-    wire["extractor"] = spy
+    spy = SpyRecommender(GeminiRecommendation(
+        preferences=PreferenceObject(genres=["should-not-be-used"]), suggestions=[]
+    ))
+    wire["recommender"] = spy
     wire["clients"] = FakeClients(screen=[_media("A", genres=["Fantasy"])])
     resp = client.post(
         "/recommendations",
@@ -188,15 +227,24 @@ def test_prestructured_preferences_bypass_llm(client, wire):
 
 
 # --------------------------------------------------------------------------- #
-# The LLM call is bounded: exactly one extract(), and only for extraction
+# The Gemini call is bounded: exactly one recommend() (Phase 9), and
+# suggestions are resolved via TMDb `search`, never `discover`.
 # --------------------------------------------------------------------------- #
-def test_llm_called_once_and_only_for_extraction(client, wire):
-    spy = SpyExtractor(
-        PreferenceObject(genres=["Crime"], mood=["tense"], explicit_fields=["genres"])
-    )
-    wire["extractor"] = spy
+def test_gemini_recommend_called_once_and_resolves_via_search(client, wire):
+    cold_ledger = _media("A", genres=["Crime"], title="Cold Ledger", rating=7.2)
+    spy = SpyRecommender(GeminiRecommendation(
+        preferences=PreferenceObject(genres=["Crime"], explicit_fields=["genres"]),
+        suggestions=[
+            GeminiSuggestion(
+                title="Cold Ledger", media_type="movie", year=2018,
+                reason="A gritty, tense crime drama.",
+            ),
+        ],
+    ))
+    wire["recommender"] = spy
     wire["clients"] = FakeClients(
-        screen=[_media("A", genres=["Crime"]), _media("B", genres=["Crime"])]
+        screen=[_media("B", genres=["Crime"])],  # would only appear via the OLD path
+        search_results={"Cold Ledger": [cold_ledger]},
     )
     resp = client.post("/recommendations", json={"request": "gritty crime stuff"})
     assert resp.status_code == 200
@@ -204,15 +252,23 @@ def test_llm_called_once_and_only_for_extraction(client, wire):
     assert body["extraction"] == "llm"
     assert len(spy.calls) == 1  # exactly one bounded call
     assert spy.calls[0] == "gritty crime stuff"
-    # candidates really were built (deterministic path ran)
-    assert any(c[0] == "tmdb" for c in wire["clients"].discover_calls)
+    ids = {r["media"]["source_id"] for r in body["results"]}
+    assert ids == {"A"}  # resolved via search — "B" (discover-only) never entered
+    assert body["results"][0]["reason"] == "A gritty, tense crime drama."
+    # resolution used `.search()`, never the old `.discover()` query
+    assert wire["clients"].search_calls == [("tmdb_search", "Cold Ledger", "movie")]
+    assert wire["clients"].discover_calls == []
 
 
 def test_gemini_call_config_is_bounded_and_union_free():
     from app.services.llm import gemini
 
     assert gemini._MAX_OUTPUT_TOKENS <= 1024
-    assert gemini._TIMEOUT_MS <= 10_000
+    # Gemini enforces its own minimum request deadline of 10s — a timeout below
+    # that fails every call with 400 INVALID_ARGUMENT regardless of network
+    # conditions (the Phase 8 fix bug). "Bounded" (spec §10: "one short
+    # timeout") means clearing that floor while staying short, not racing it.
+    assert 10_000 <= gemini._TIMEOUT_MS <= 15_000
     # response schema must be union-free (no anyOf/oneOf) for portability
     dumped = repr(gemini._RESPONSE_SCHEMA)
     assert "anyOf" not in dumped and "oneOf" not in dumped
@@ -645,3 +701,248 @@ def test_zero_signal_scoring_uses_quality_prior_not_novelty():
     so = score_candidate(obscure, prefs, taste)
     assert sg.explanation.any_preference_signal() is False
     assert sg.score > so.score
+
+
+# --------------------------------------------------------------------------- #
+# Novelty/ranking fix regression (spec §9.1/§9.3): once preference_match
+# saturates for a whole genre+language cohort, a strong external rating must
+# never be actively penalised by the novelty term. Component-level coverage is
+# in test_novelty_scoring.py; these exercise the same fix end-to-end via the
+# API, across the request shapes named in the diagnosis.
+# --------------------------------------------------------------------------- #
+def test_telugu_love_story_surfaces_quality_pick(client, wire):
+    """Regression for the diagnosed case: real TMDb rating/popularity values
+    for a Telugu-romance cohort where every candidate matches genre+language
+    identically. The well-reviewed pick must be the top result, not buried
+    behind lower-rated peers."""
+    wire["clients"] = FakeClients(
+        screen=[
+            _media("SITA", genres=["Romance", "Drama", "History"], rating=7.829,
+                   popularity=4.137, language="te", title="Sita Ramam"),
+            _media("LOW1", genres=["Romance", "Drama"], rating=3.0, popularity=3.0,
+                   language="te", title="Madhura Wines"),
+            _media("LOW2", genres=["Romance", "Drama"], rating=4.0, popularity=3.1,
+                   language="te", title="Deewana"),
+            _media("MID", genres=["Romance", "Drama"], rating=5.8, popularity=3.3,
+                   language="te", title="RDX Love"),
+        ]
+    )
+    body = client.post("/recommendations", json={"request": "Telugu love story"}).json()
+    assert body["extraction"] == "fallback"  # LLM disabled in conftest
+    p = body["preferences"]
+    assert "romance" in p["genres"] and p["language"] == ["telugu"]
+    ids = [r["media"]["source_id"] for r in body["results"]]
+    assert ids[0] == "SITA"
+
+
+def test_romantic_movie_prefers_better_reviewed_match(client, wire):
+    """Extends test_romantic_movie_is_content_not_just_mood: among candidates
+    that already pass the hard genre filter, the higher-rated one must rank
+    first, not last."""
+    wire["clients"] = FakeClients(
+        screen=[
+            _media("GOOD", genres=["Romance", "Drama"], rating=8.4, popularity=30.0,
+                   title="Two Trains", description="A tender long-distance romance."),
+            _media("MEH", genres=["Romance", "Drama"], rating=4.1, popularity=28.0,
+                   title="Faded Letters", description="A forgettable romance."),
+        ]
+    )
+    body = client.post("/recommendations", json={"request": "a romantic movie"}).json()
+    ids = [r["media"]["source_id"] for r in body["results"]]
+    assert ids[0] == "GOOD"
+
+
+def test_rating_threshold_request_orders_survivors_by_quality(client, wire):
+    """Rating bound stays a hard filter (violator dropped), and among the
+    survivors that clear it, the novelty fix must not still prefer the
+    lower-rated one."""
+    wire["clients"] = FakeClients(
+        screen=[
+            _media("VIOLATOR", genres=["Comedy"], rating=6.9, popularity=20.0,
+                   title="Below The Bar"),
+            _media("BARELY", genres=["Comedy"], rating=7.6, popularity=15.0,
+                   title="Just Clears It"),
+            _media("STRONG", genres=["Comedy"], rating=9.1, popularity=18.0,
+                   title="Clear Winner"),
+        ]
+    )
+    body = client.post(
+        "/recommendations", json={"request": "a comedy movie rated above 7.5"}
+    ).json()
+    ids = [r["media"]["source_id"] for r in body["results"]]
+    assert "VIOLATOR" not in ids  # hard filter unaffected by the scoring fix
+    assert ids[0] == "STRONG"  # among survivors, quality now orders correctly
+
+
+def test_fun_not_scary_prefers_higher_rated_safe_pick(client, wire):
+    """Extends test_not_scary_negative_constraint_unchanged: the avoid-term
+    hard filter still drops the scary pick, and among the safe candidates the
+    better-rated one now ranks first."""
+    wire["clients"] = FakeClients(
+        screen=[
+            _media("SAFE_GOOD", genres=["Comedy", "Family"], rating=8.2,
+                   popularity=25.0, title="Warm Bread"),
+            _media("SAFE_MEH", genres=["Comedy", "Family"], rating=4.5,
+                   popularity=22.0, title="Stale Loaf"),
+            _media("SCARY", genres=["Horror"], rating=8.9, popularity=90.0,
+                   title="The Attic"),
+        ]
+    )
+    body = client.post(
+        "/recommendations", json={"request": "a fun movie which is not scary"}
+    ).json()
+    ids = [r["media"]["source_id"] for r in body["results"]]
+    assert "SCARY" not in ids
+    assert ids[0] == "SAFE_GOOD"
+
+
+def test_surprise_me_still_prefers_quality_over_obscurity(client, wire):
+    """"Surprise me" (no preferences at all) must keep favouring a well-
+    reviewed pick over a merely-obscure/low-rated one — the has_signal=False
+    branch was already correct and must remain untouched by the novelty fix."""
+    wire["clients"] = FakeClients(
+        screen=[
+            _media("QUALITY", genres=["Drama"], rating=8.7, popularity=45.0,
+                   title="Well Regarded"),
+            _media("OBSCURE", genres=["Horror"], rating=4.9, popularity=7.0,
+                   title="Forgotten Reel"),
+        ]
+    )
+    body = client.post("/recommendations", json={"preferences": {}}).json()
+    assert body["state"] == "results"
+    ids = [r["media"]["source_id"] for r in body["results"]]
+    assert ids[0] == "QUALITY"
+
+
+# --------------------------------------------------------------------------- #
+# Language hard-filter fix (spec §7): reported bug — "telugu lovestory movie"
+# returned an English candidate because language was only a soft scoring
+# signal, never a hard filter. Component-level coverage (matches_explicit_
+# language, unresolved-language behavior, build_candidates' screen_langs
+# guard) is in test_language_filter.py; these are the end-to-end regressions.
+# --------------------------------------------------------------------------- #
+def test_explicit_language_rejects_wrong_language_candidate_deterministic_path(client, wire):
+    """(A) The exact reported shape on the deterministic fallback: explicit
+    Telugu + Romance genre. An English Romance candidate must never survive;
+    a Telugu one must. Uses `preferences` directly (Gemini disabled by the
+    fixture default) to exercise `_filter_pool`/`matches_explicit_language`
+    without depending on how any particular text happens to extract."""
+    wire["clients"] = FakeClients(
+        screen=[
+            _media("EN_ROM", genres=["Romance", "Drama"], language="en", rating=6.6,
+                   popularity=198.0, title="The Last Sunrise"),
+            _media("TE_ROM", genres=["Romance", "Drama"], language="te", rating=7.8,
+                   popularity=4.1, title="Sita Ramam"),
+        ]
+    )
+    body = client.post(
+        "/recommendations",
+        json={"preferences": {
+            "media_type": ["movie"], "genres": ["Romance"], "language": ["Telugu"],
+            "explicit_fields": ["media_type", "genres", "language"],
+        }},
+    ).json()
+    ids = {r["media"]["source_id"] for r in body["results"]}
+    assert "EN_ROM" not in ids
+    assert ids == {"TE_ROM"}
+
+
+def test_explicit_language_rejects_wrong_language_gemini_suggestion(client, wire):
+    """(A, Gemini-primary path) Even if Gemini itself suggests a wrong-language
+    title (simulating it not perfectly honoring the prompt instruction — the
+    exact 'Kannada action movie despite Telugu request' scenario), the
+    post-resolution objective language check must still discard it. This is
+    the structural guarantee: personalization/Gemini judgment can select
+    among valid candidates, but can never override an explicit constraint."""
+    sita_ramam = _media("SITA", genres=["History", "Romance", "Drama"], language="te",
+                         rating=7.8, title="Sita Ramam", year=2022)
+    wrong_lang = _media("WRONG", genres=["Action"], language="kn",
+                         rating=8.0, title="Some Kannada Action Movie", year=2019)
+    wire["recommender"] = SpyRecommender(GeminiRecommendation(
+        preferences=PreferenceObject(
+            media_type=["movie"], language=["Telugu"], explicit_fields=["language"],
+        ),
+        suggestions=[
+            GeminiSuggestion(title="Some Kannada Action Movie", media_type="movie",
+                              year=2019, reason="Fits your love of action."),
+            GeminiSuggestion(title="Sita Ramam", media_type="movie", year=2022,
+                              reason="A tender, romantic Telugu period drama."),
+        ],
+    ))
+    wire["clients"] = FakeClients(
+        search_results={
+            "Some Kannada Action Movie": [wrong_lang],
+            "Sita Ramam": [sita_ramam],
+        }
+    )
+    body = client.post("/recommendations", json={"request": "telugu love stories"}).json()
+    ids = {r["media"]["source_id"] for r in body["results"]}
+    assert "WRONG" not in ids
+    assert ids == {"SITA"}
+
+
+def test_explicit_language_unresolved_token_yields_empty_not_arbitrary(client, wire):
+    """(C) An explicit language that fails to resolve to any known code must
+    never silently permit arbitrary-language candidates through — an honest
+    empty result, same philosophy as an unsatisfiable rating bound."""
+    wire["clients"] = FakeClients(
+        screen=[
+            _media("A", genres=["Romance"], language="en", title="Some English Film"),
+            _media("B", genres=["Romance"], language="te", title="Some Telugu Film"),
+        ]
+    )
+    body = client.post(
+        "/recommendations",
+        json={
+            "preferences": {
+                "media_type": ["movie"],
+                "genres": ["romance"],
+                "language": ["Klingon"],
+                "explicit_fields": ["genres", "language"],
+            }
+        },
+    ).json()
+    assert body["state"] == "results"
+    assert body["results"] == []  # no wrong-language substitute is ever returned
+
+
+def test_no_explicit_language_allows_multiple_languages(client, wire):
+    """(D) Without an explicit language, results may legitimately span
+    languages — the fix must not over-filter the unconstrained case."""
+    wire["clients"] = FakeClients(
+        screen=[
+            _media("EN", genres=["Drama"], language="en", rating=7.5, title="English Drama"),
+            _media("KO", genres=["Drama"], language="ko", rating=7.6, title="Korean Drama"),
+        ]
+    )
+    body = client.post("/recommendations", json={"request": "a good drama"}).json()
+    assert body["preferences"].get("language") in (None, [])
+    ids = {r["media"]["source_id"] for r in body["results"]}
+    assert {"EN", "KO"} <= ids
+
+
+def test_all_hard_constraints_compose_after_language_fix(client, wire):
+    """(E) Rating threshold, explicit genre, avoid terms, and the new language
+    filter must all still apply together correctly, not just individually."""
+    wire["clients"] = FakeClients(
+        screen=[
+            _media("WINNER", genres=["Romance"], language="te", rating=8.1,
+                   description="A tender romance.", title="Winner"),
+            _media("WRONG_LANG", genres=["Romance"], language="hi", rating=8.5,
+                   description="A tender romance.", title="Wrong Language"),
+            _media("BELOW_RATING", genres=["Romance"], language="te", rating=6.0,
+                   description="A tender romance.", title="Below Rating"),
+            _media("WRONG_GENRE", genres=["Horror"], language="te", rating=9.0,
+                   description="A tender romance.", title="Wrong Genre"),
+            _media("AVOID_HIT", genres=["Romance"], language="te", rating=8.9,
+                   description="A story built around violence and tragedy.", title="Avoid Hit"),
+        ]
+    )
+    body = client.post(
+        "/recommendations",
+        json={
+            "request": "a telugu romance movie rated above 7.5, no violence"
+        },
+    ).json()
+    ids = {r["media"]["source_id"] for r in body["results"]}
+    assert ids == {"WINNER"}

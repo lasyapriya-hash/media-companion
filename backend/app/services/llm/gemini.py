@@ -15,13 +15,24 @@ import json
 import logging
 
 from app.schemas.preference import PreferenceObject, RatingRange, ReleaseWindow
+from app.services.llm.base import GeminiRecommendation, GeminiSuggestion
 from app.services.normalization import MOOD_TAG_VOCABULARY
 from app.services.vocab import normalise_mood_tone
 
 logger = logging.getLogger("uvicorn.error")
 
-DEFAULT_MODEL = "gemini-2.5-flash"
-_TIMEOUT_MS = 8000
+# gemini-2.5-flash was retired for this project's API key/tier (404 "no longer
+# available to new users"). Google's error pointed at gemini-3.6-flash, but
+# that's a "thinking" model whose reasoning tokens are drawn from the same
+# `max_output_tokens` budget as the visible JSON — live-verified it burns
+# ~600 of 640 tokens on internal thoughts alone, truncating the actual answer
+# (finish_reason=MAX_TOKENS) and running 5-17s. gemini-3.5-flash-lite is the
+# lite-tier sibling: no reasoning-token overhead, consistently <2s, clean
+# `finish_reason=STOP` — pinned, not "-latest", so behavior doesn't drift.
+DEFAULT_MODEL = "gemini-3.5-flash-lite"
+# Must stay >= the API's own enforced minimum deadline (10s) or every call
+# fails with 400 INVALID_ARGUMENT regardless of network conditions.
+_TIMEOUT_MS = 12000
 _MAX_OUTPUT_TOKENS = 640
 
 # Union-free JSON schema for the structured-output call. `release_period` is
@@ -202,6 +213,161 @@ class GeminiExtractor:
                 last_exc = exc
                 logger.warning("Gemini extraction attempt %d failed: %s", attempt, exc)
         logger.warning("Gemini extraction giving up, using fallback: %s", last_exc)
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# Primary semantic recommendation (Phase 9 hybrid architecture) — one call
+# that returns both the objective `PreferenceObject` (identical shape/parsing
+# to `GeminiExtractor`) and a bounded list of title suggestions Gemini judged
+# to fit the request *semantically*: genre, mood, tone, vibe, theme. Gemini
+# reasons about this with its own knowledge — it is never told to imitate a
+# fixed tag vocabulary, and the caller must never re-judge semantic fit by
+# checking a resolved title's TMDb genre tags (that recreates exactly the bug
+# this architecture exists to avoid). Only objective facts — existence,
+# language, media type, rating, release period — are re-verified downstream.
+# --------------------------------------------------------------------------- #
+_RECOMMEND_MAX_OUTPUT_TOKENS = 1536
+_MAX_SUGGESTIONS = 12
+
+_RECOMMEND_RESPONSE_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        **_RESPONSE_SCHEMA["properties"],
+        "recommendations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "media_type": {
+                        "type": "string",
+                        "enum": ["movie", "series", "book"],
+                    },
+                    "year": {"type": "integer", "nullable": True},
+                    "reason": {"type": "string"},
+                },
+                "required": ["title", "media_type", "reason"],
+            },
+        },
+    },
+    "required": [*_RESPONSE_SCHEMA["required"], "recommendations"],
+}
+
+_RECOMMEND_SYSTEM_INSTRUCTION = (
+    _SYSTEM_INSTRUCTION + " "
+    f"In addition, using your own knowledge of movies, series, and books — not "
+    f"any fixed tag or genre vocabulary — recommend up to {_MAX_SUGGESTIONS} "
+    "specific, real titles that genuinely fit the request's semantic meaning: "
+    "its genre, mood, tone, themes, and vibe (for example: a love story, "
+    "comedy, cozy, wholesome, feel-good, scary or explicitly NOT scary, "
+    "slow-burn, bittersweet). You decide this yourself from what you actually "
+    "know about each title — do not rely on how any database happens to tag "
+    "it. Only recommend titles you are confident really exist; never invent "
+    "one. For each, give the release year you associate it with (or null if "
+    "unsure) and one concise sentence on why it fits — but never state a "
+    "rating, runtime, or streaming availability in that reason; you are not "
+    "the source of truth for those facts, they are verified separately. If "
+    "the request says to avoid something, never recommend a title that "
+    "clearly involves it. `recommendations` may be empty if nothing genuinely "
+    "fits — never pad it with a weak or unrelated match. A taste-profile "
+    "summary may follow the request as background context only: it must "
+    "never override or substitute for anything the request states outright — "
+    "an explicit language, genre, or title in the request always wins over a "
+    "personalization preference."
+)
+
+
+def _to_suggestion(entry: object) -> GeminiSuggestion | None:
+    if not isinstance(entry, dict):
+        return None
+    title = entry.get("title")
+    media_type = entry.get("media_type")
+    reason = entry.get("reason")
+    if not isinstance(title, str) or not title.strip():
+        return None
+    if media_type not in ("movie", "series", "book"):
+        return None
+    if not isinstance(reason, str) or not reason.strip():
+        return None
+    year = entry.get("year")
+    return GeminiSuggestion(
+        title=title.strip(),
+        media_type=media_type,
+        year=year if isinstance(year, int) else None,
+        reason=reason.strip(),
+    )
+
+
+def _to_suggestions(value: object) -> list[GeminiSuggestion]:
+    if not isinstance(value, list):
+        return []
+    out: list[GeminiSuggestion] = []
+    for entry in value[:_MAX_SUGGESTIONS]:
+        s = _to_suggestion(entry)
+        if s is not None:
+            out.append(s)
+    return out
+
+
+class GeminiRecommender:
+    """The primary recommendation path (Phase 9). One bounded call; never
+    raises. `PreferenceExtractor`-compatible (`extract`) plus `recommend`."""
+
+    def __init__(self, *, api_key: str, model: str | None = None) -> None:
+        self._api_key = api_key
+        self._model = model or DEFAULT_MODEL
+
+    def _raw_call(self, request_text: str, taste_context: str) -> str:
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(
+            api_key=self._api_key,
+            http_options=types.HttpOptions(timeout=_TIMEOUT_MS),
+        )
+        contents = request_text.strip()
+        if taste_context:
+            contents = f"{contents}\n\n{taste_context}"
+        resp = client.models.generate_content(
+            model=self._model,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=_RECOMMEND_SYSTEM_INSTRUCTION,
+                temperature=0.0,
+                max_output_tokens=_RECOMMEND_MAX_OUTPUT_TOKENS,
+                response_mime_type="application/json",
+                response_schema=_RECOMMEND_RESPONSE_SCHEMA,
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                    disable=True
+                ),
+            ),
+        )
+        return (resp.text or "").strip()
+
+    def recommend(
+        self, request_text: str, *, taste_context: str = ""
+    ) -> GeminiRecommendation | None:
+        if not request_text or not request_text.strip():
+            return None
+        last_exc: Exception | None = None
+        for attempt in (1, 2):  # one bounded retry
+            try:
+                text = self._raw_call(request_text, taste_context)
+                start, end = text.find("{"), text.rfind("}")
+                if start != -1 and end != -1:
+                    text = text[start : end + 1]
+                data = json.loads(text)
+                if not isinstance(data, dict):
+                    raise ValueError("response was not a JSON object")
+                return GeminiRecommendation(
+                    preferences=_to_preference(data),
+                    suggestions=_to_suggestions(data.get("recommendations")),
+                )
+            except Exception as exc:  # noqa: BLE001 - never propagate; fall back
+                last_exc = exc
+                logger.warning("Gemini recommend attempt %d failed: %s", attempt, exc)
+        logger.warning("Gemini recommend giving up, using fallback: %s", last_exc)
         return None
 
 

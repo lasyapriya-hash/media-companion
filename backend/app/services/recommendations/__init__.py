@@ -1,15 +1,22 @@
-"""Recommendation session orchestrator (spec §8).
+"""Recommendation session orchestrator (spec §8; Phase 9 hybrid architecture).
 
 Flow (spec §8.1):
-  request -> extracting -> [sparse?] needs_clarification -> awaiting_answer
-          -> (answer | decline | empty) -> ranking -> results
-          -> [sufficient?] ranking -> results
+  request -> extracting -> [sparse AND no Gemini suggestions?] needs_clarification
+          -> awaiting_answer -> (answer | decline | empty) -> ranking -> results
+          -> [sufficient OR has Gemini suggestions?] ranking -> results
   any state -> error
 
-The LLM is used **only** for extraction (the request, and re-extraction of the
-answer) and is always behind a deterministic fallback. Candidate generation,
-scoring, ranking and reason text are deterministic backend code. The single
-clarifying question is templated (`clarify.py`) — no LLM call.
+Gemini (`GeminiRecommender`, via `_extract`) is the PRIMARY recommendation
+intelligence: one bounded call both extracts the objective `PreferenceObject`
+and judges which titles semantically fit the request (genre/mood/tone/vibe),
+using its own knowledge — never a TMDb tag lookup. `gemini_pipeline` resolves
+those suggestions against TMDb/Open Library and verifies only objective facts
+(existence, language, media type, rating, release period); it never re-judges
+semantic fit. The existing deterministic pipeline (`candidates.py`/
+`scoring.py.rank`) is unchanged and used **only** as the fallback — when
+Gemini is unavailable, times out, returns malformed output, or nothing it
+suggested survives resolution + objective validation. The single clarifying
+question is templated (`clarify.py`) — no LLM call.
 
 Sessions are persisted (`recommendation_session`) so the two HTTP turns share
 state; rows are debug data and may be pruned (spec §8.4).
@@ -27,11 +34,14 @@ from app.models.enums import LibraryStatus, SessionState
 from app.models.library import LibraryEntry
 from app.models.media import MediaItem
 from app.models.recommendation import RecommendationSession
+from app.models.taste import TasteProfile
 from app.schemas.media import NormalizedMedia, WatchAvailability
 from app.schemas.preference import PreferenceObject
 from app.schemas.recommendation import RecommendationItem, RecommendationResponse
 from app.services import taste_profile as taste_service
-from app.services.llm import get_extractor, parse_preferences
+from app.services.llm import get_recommender, parse_preferences
+from app.services.llm.base import GeminiSuggestion
+from app.services.recommendations import gemini_pipeline
 from app.services.recommendations.candidates import broad_candidates, build_candidates
 from app.services.recommendations.clarify import clarifying_question, is_decline
 from app.services.recommendations.merge import merge_preferences
@@ -39,6 +49,7 @@ from app.services.recommendations.reasons import build_reason
 from app.services.recommendations.scoring import (
     hits_avoid,
     matches_explicit_genre,
+    matches_explicit_language,
     passes_quality_floor,
     rank,
     satisfies_rating,
@@ -82,9 +93,10 @@ def _filter_pool(
 ) -> list[NormalizedMedia]:
     """Apply every HARD constraint before anything is scored (spec §7).
 
-    `avoid`, an explicit numeric rating bound, and an explicitly-stated genre are
-    filters — a candidate that violates one is removed, never merely down-ranked
-    by mood / taste / novelty. Soft preferences are left for `rank`.
+    `avoid`, an explicit numeric rating bound, an explicitly-stated genre, and
+    an explicitly-stated language are filters — a candidate that violates one
+    is removed, never merely down-ranked by mood / taste / novelty. Soft
+    preferences are left for `rank`.
     """
     return [
         it
@@ -94,6 +106,7 @@ def _filter_pool(
         and not hits_avoid(it, prefs.avoid)
         and satisfies_rating(it, prefs.rating)
         and matches_explicit_genre(it, prefs)
+        and matches_explicit_language(it, prefs)
     ]
 
 
@@ -129,21 +142,33 @@ def _book_link(item: NormalizedMedia) -> str | None:
 
 
 def _extract(
-    request_text: str | None, preferences: PreferenceObject | None
-) -> tuple[PreferenceObject, str]:
+    request_text: str | None,
+    preferences: PreferenceObject | None,
+    taste: TasteProfile,
+) -> tuple[PreferenceObject, str, list[GeminiSuggestion] | None]:
+    """Returns `(prefs, extraction_source, gemini_suggestions)`.
+
+    `gemini_suggestions` is `None` when Gemini wasn't used or raised — the
+    caller's signal to run the fully deterministic pipeline. When Gemini
+    succeeds it may still return an empty list ("nothing genuinely fits");
+    that is also a fallback signal, but it's for `_rank_and_finalize` to act
+    on (after a resolution attempt), not this function.
+    """
     if preferences is not None:
-        return preferences, "fallback"  # client-supplied; no LLM involved
+        return preferences, "fallback", None  # client-supplied; no LLM involved
     text = (request_text or "").strip()
-    extractor = get_extractor()
-    if extractor is not None:
+    recommender = get_recommender()
+    if recommender is not None:
         try:
-            prefs = extractor.extract(text)
-        except Exception as exc:  # noqa: BLE001 - defensive; extractor should not raise
-            logger.warning("LLM extractor raised, falling back: %s", exc)
-            prefs = None
-        if prefs is not None:
-            return prefs, "llm"
-    return parse_preferences(text), "fallback"
+            result = recommender.recommend(
+                text, taste_context=gemini_pipeline.taste_context(taste)
+            )
+        except Exception as exc:  # noqa: BLE001 - defensive; recommender should not raise
+            logger.warning("Gemini recommend raised, falling back: %s", exc)
+            result = None
+        if result is not None:
+            return result.preferences, "llm", result.suggestions
+    return parse_preferences(text), "fallback", None
 
 
 # --------------------------------------------------------------------------- #
@@ -155,42 +180,68 @@ def _rank_and_finalize(
     prefs: PreferenceObject,
     extraction: str,
     limit: int,
+    taste: TasteProfile,
+    gemini_suggestions: list[GeminiSuggestion] | None = None,
 ) -> RecommendationResponse:
     session.state = SessionState.ranking
     session.preference_object = prefs.model_dump(mode="json")
     db.flush()
 
-    taste = taste_service.get_or_compute(db)
     excluded = _excluded_keys(db)
+    items: list[RecommendationItem] = []
 
-    candidates, all_failed = build_candidates(prefs, taste)
-    pool = _filter_pool(candidates, prefs, excluded)
-
-    if not pool:
-        # spec §8.2: `ranking` still yields a list unless every source is down.
-        # The hard filters stay applied to the broad pull too — better an honest
-        # empty list than a candidate that violates a stated bound.
-        broad = broad_candidates(prefs)
-        if broad:
-            all_failed = False
-        pool = _filter_pool(broad, prefs, excluded)
-
-    if not pool and all_failed:
-        session.state = SessionState.error
-        db.commit()
-        raise RecommendationError("no recommendation data sources are reachable")
-
-    ranked = rank(pool, prefs, taste, limit)
-    items = [
-        RecommendationItem(
-            media=sc.item,
-            score=sc.score,
-            reason=build_reason(sc.item, prefs, sc.explanation, taste),
-            availability=_availability(sc.item),
-            book_link=_book_link(sc.item),
+    if gemini_suggestions:
+        # Primary path: Gemini already judged semantic fit. Resolve each
+        # suggestion against real metadata and verify only objective facts —
+        # never re-judge relevance by TMDb tag (spec: Phase 9). Gemini's own
+        # order and reason are used as-is; the deterministic scorer never
+        # touches this list.
+        resolved = gemini_pipeline.resolve_and_validate(
+            gemini_suggestions, prefs, excluded, limit
         )
-        for sc in ranked
-    ]
+        items = [
+            RecommendationItem(
+                media=media,
+                score=score,
+                reason=reason,
+                availability=_availability(media),
+                book_link=_book_link(media),
+            )
+            for media, score, reason in resolved
+        ]
+
+    if not items:
+        # Fallback: Gemini unavailable, malformed, empty, or every suggestion
+        # failed resolution/objective validation. The existing deterministic
+        # pipeline, byte-for-byte unchanged.
+        candidates, all_failed = build_candidates(prefs, taste)
+        pool = _filter_pool(candidates, prefs, excluded)
+
+        if not pool:
+            # spec §8.2: `ranking` still yields a list unless every source is down.
+            # The hard filters stay applied to the broad pull too — better an honest
+            # empty list than a candidate that violates a stated bound.
+            broad = broad_candidates(prefs)
+            if broad:
+                all_failed = False
+            pool = _filter_pool(broad, prefs, excluded)
+
+        if not pool and all_failed:
+            session.state = SessionState.error
+            db.commit()
+            raise RecommendationError("no recommendation data sources are reachable")
+
+        ranked = rank(pool, prefs, taste, limit)
+        items = [
+            RecommendationItem(
+                media=sc.item,
+                score=sc.score,
+                reason=build_reason(sc.item, prefs, sc.explanation, taste),
+                availability=_availability(sc.item),
+                book_link=_book_link(sc.item),
+            )
+            for sc in ranked
+        ]
 
     session.results = [it.model_dump(mode="json") for it in items]
     session.state = SessionState.results
@@ -224,17 +275,22 @@ def start_session(
     db.add(session)
     db.flush()  # assign session.id
 
+    taste = taste_service.get_or_compute(db)
+
     # A pre-structured preference object is the caller's own answer — skip both
     # the LLM and the clarifying turn (spec §8.3 / Phase 4).
     if preferences is not None:
         session.clarification_used = True
-        return _rank_and_finalize(db, session, preferences, "fallback", limit)
+        return _rank_and_finalize(db, session, preferences, "fallback", limit, taste)
 
-    prefs, extraction = _extract(text, None)
+    prefs, extraction, suggestions = _extract(text, None, taste)
     session.preference_object = prefs.model_dump(mode="json")
 
-    if prefs.is_sufficient():
-        return _rank_and_finalize(db, session, prefs, extraction, limit)
+    # Gemini already having usable suggestions is itself sufficient — it means
+    # the primary path can already answer, regardless of how sparse the
+    # extracted structured object looks (spec: Phase 9 hybrid architecture).
+    if suggestions or prefs.is_sufficient():
+        return _rank_and_finalize(db, session, prefs, extraction, limit, taste, suggestions)
 
     # Sparse -> ask exactly one templated question (spec §8.3).
     question = clarifying_question(prefs)
@@ -271,19 +327,21 @@ def answer_session(
     if session.clarification_used or session.state not in _ANSWERABLE_STATES:
         raise ClarificationClosed(str(session_id))
 
+    taste = taste_service.get_or_compute(db)
     existing = PreferenceObject(**(session.preference_object or {}))
     answer = (answer_text or "").strip()
     session.clarification_answer = answer or None
 
+    suggestions: list[GeminiSuggestion] | None = None
     if answer and not is_decline(answer):
-        new_prefs, extraction = _extract(answer, None)
+        new_prefs, extraction, suggestions = _extract(answer, None, taste)
         merged = merge_preferences(existing, new_prefs)
     else:
         # Declined / empty -> straight to ranking with the existing prefs.
         merged, extraction = existing, "fallback"
 
     session.clarification_used = True  # set before ranking; invariant holds even on error
-    return _rank_and_finalize(db, session, merged, extraction, limit)
+    return _rank_and_finalize(db, session, merged, extraction, limit, taste, suggestions)
 
 
 # --------------------------------------------------------------------------- #

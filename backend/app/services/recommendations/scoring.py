@@ -4,7 +4,9 @@ Movies/series: weighted `preference_match`, `taste_profile_match`, `novelty`
 minus a `penalty` (spec §9.1, weights 0.50 / 0.35 / 0.15 per §15 D4).
 Books: `genre_overlap + mood_tag_overlap` with a taste tiebreaker (spec §9.2).
 
-`external_rating` never enters a sort key — only a low quality floor (spec §9.3).
+`external_rating` is never a primary sort key — it contributes only as a low
+quality floor (`passes_quality_floor`) and, monotonically (never penalised for
+being high), as part of the small `novelty` blend (spec §9.3).
 No LLM anywhere in this module.
 """
 from __future__ import annotations
@@ -127,8 +129,76 @@ def matches_explicit_genre(item: NormalizedMedia, prefs: PreferenceObject) -> bo
     return bool(want & _cand_genres(item))
 
 
+def explicit_languages(prefs: PreferenceObject) -> set[str] | None:
+    """Canonical ISO 639-1 codes the user asked for outright, or `None` when
+    there is no explicit language constraint (spec §7).
+
+    A stated language that fails to resolve through `language_to_code` (e.g.
+    an unrecognised name) returns an EMPTY set — deliberately distinct from
+    `None` — so `matches_explicit_language` still treats it as a hard filter
+    nothing can satisfy, rather than silently becoming unrestricted. Mirrors
+    `satisfies_rating`: an unmet/unverifiable explicit constraint excludes the
+    candidate, it never lets one slip through unchecked.
+    """
+    if "language" not in (prefs.explicit_fields or []) or not prefs.language:
+        return None
+    return {c for c in (language_to_code(l) for l in prefs.language) if c}
+
+
+def matches_explicit_language(item: NormalizedMedia, prefs: PreferenceObject) -> bool:
+    want = explicit_languages(prefs)
+    if want is None:
+        return True
+    # Only screen media (TMDb `original_language`, ISO 639-1) is hard-filtered
+    # here. Open Library/Google Books use inconsistent language-code formats —
+    # notably, the project's own OL 3-letter map (`_OL_LANG_3`) is missing
+    # several Indian languages — so hard-filtering books on the same codes
+    # would wrongly reject legitimate matches. Same precedent and reasoning as
+    # `matches_explicit_genre`'s book exemption (spec §9.2).
+    if getattr(item.type, "value", item.type) not in ("movie", "series"):
+        return True
+    have = language_to_code(item.language or "")
+    return have in want
+
+
+def matches_explicit_media_type(item: NormalizedMedia, prefs: PreferenceObject) -> bool:
+    """An explicit media-type constraint is objective — the resolved item's own
+    type either matches what the user asked for or it doesn't (Phase 9: used
+    to verify a Gemini-suggested-and-resolved title, never to judge semantic
+    fit)."""
+    if not prefs.media_type:
+        return True
+    return getattr(item.type, "value", item.type) in prefs.media_type
+
+
+def matches_explicit_period(item: NormalizedMedia, prefs: PreferenceObject) -> bool:
+    """An explicit release-year/period constraint is objective (spec §7). A
+    resolved item with no known year cannot be confirmed to satisfy it, so it
+    is excluded — same "unverifiable -> excluded" precedent as `satisfies_
+    rating`."""
+    if prefs.release_period is None:
+        return True
+    if item.year is None:
+        return False
+    year_from, year_to = period_years(prefs.release_period)
+    if year_from is not None and item.year < year_from:
+        return False
+    if year_to is not None and item.year > year_to:
+        return False
+    return True
+
+
 def hits_avoid(item: NormalizedMedia, avoid: list[str]) -> bool:
-    """`avoid` is always a hard filter (spec §7)."""
+    """`avoid` is a hard filter for the deterministic pipeline (spec §7).
+
+    This is keyword matching against title/description/genre/mood-tags — a
+    reasonable proxy when *retrieval* itself is tag-driven, but not a semantic
+    judgment. Deliberately NOT reused on the Gemini-primary path (Phase 9):
+    there, `avoid` is instead given to Gemini as an instruction not to suggest
+    such a title in the first place — using this keyword filter as a hard gate
+    on Gemini's picks would recreate the same "TMDb tag is the semantic
+    authority" problem for `avoid` that this architecture removes for genre.
+    """
     if not avoid:
         return False
     hay = " ".join(
@@ -241,15 +311,24 @@ def _period_signal(prefs: PreferenceObject, item: NormalizedMedia, exp: MatchExp
 
 
 def _novelty(item: NormalizedMedia) -> float:
-    r = item.external_rating if item.external_rating is not None else 6.0
-    nov_rating = 1.0 - _clamp((r - 6.0) / 4.0)
+    """Diversity signal (spec §9.1): rewards a lesser-known title by popularity.
+
+    `external_rating` is blended in the *same direction* it is used everywhere
+    else in this module (spec §9.3: higher is better) — never inverted. Rating
+    and popularity are different axes (a title can be low-popularity *and*
+    well-reviewed); treating a high rating as "less novel" was penalising
+    quality instead of measuring obscurity. A missing rating defaults to a
+    neutral 0.6, matching the previous default's midpoint.
+    """
+    r = item.external_rating
+    quality = _clamp(r / 10.0) if r is not None else 0.6
     pop = None
     if isinstance(item.raw_metadata, dict):
         pop = item.raw_metadata.get("popularity")
     if isinstance(pop, (int, float)):
         nov_pop = 1.0 - _clamp(float(pop) / 200.0)
-        return (nov_rating + nov_pop) / 2
-    return nov_rating
+        return (nov_pop + quality) / 2
+    return quality
 
 
 def _taste_profile_match(item: NormalizedMedia, taste: TasteProfile, exp: MatchExplanation):
@@ -354,10 +433,11 @@ def score_candidate(
 
     # Novelty (spec §9.1) is a *small* diversity nudge — only meaningful when
     # there is a real preference or taste signal to diversify around. With
-    # neither, novelty alone would rank obscure / low-rated titles first
-    # (an inversion of quality). In that degenerate case, spend the same 0.15
-    # weight on a mild quality prior instead (spec §9.3 allows `external_rating`
-    # as a low-weight quality floor).
+    # neither ("surprise me"), skip the popularity-obscurity half entirely and
+    # spend the same 0.15 weight purely on quality (spec §9.3 allows
+    # `external_rating` as a low-weight signal) — `_novelty()` itself no longer
+    # inverts on rating either way, so this split is about which half of the
+    # blend is relevant, not about avoiding a quality penalty.
     has_signal = preference_match > 0.0 or taste_match > 0.0
     if has_signal:
         diversity = novelty

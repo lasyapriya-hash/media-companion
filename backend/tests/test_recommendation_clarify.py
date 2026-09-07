@@ -11,11 +11,12 @@ import pytest
 
 from tests.test_recommendations import (  # noqa: F401  (wire is a fixture)
     FakeClients,
-    SpyExtractor,
+    SpyRecommender,
     _media,
     wire,
 )
 from app.schemas.preference import PreferenceObject
+from app.services.llm.base import GeminiRecommendation
 
 RICH = "a dark, tense crime thriller movie"
 SPARSE = "something for tonight"
@@ -200,20 +201,21 @@ def test_answer_bad_session_id_is_422(client):
 
 
 # --------------------------------------------------------------------------- #
-# The LLM is still only used for extraction (spec §8.2)
+# The Gemini call is bounded: exactly one per turn (spec §8.2; Phase 9)
 # --------------------------------------------------------------------------- #
-def test_answer_reextraction_uses_the_llm_interface_once(client, stocked):
-    # returns nothing usable, so the request stays sparse and a question is asked
-    spy = SpyExtractor(PreferenceObject())
-    stocked["extractor"] = spy
+def test_answer_reextraction_uses_the_gemini_interface_once(client, stocked):
+    # returns nothing usable (empty prefs, no suggestions), so the request
+    # stays sparse and a question is asked
+    spy = SpyRecommender(GeminiRecommendation(preferences=PreferenceObject(), suggestions=[]))
+    stocked["recommender"] = spy
 
     q = client.post("/recommendations", json={"request": SPARSE}).json()
     assert q["state"] == "needs_clarification"
-    assert spy.calls == [SPARSE]  # one extraction for the request
+    assert spy.calls == [SPARSE]  # one call for the request
 
     a = client.post(
         f"/recommendations/{q['session_id']}/answer", json={"answer": "gritty crime"}
     ).json()
     assert a["state"] == "results"
-    # exactly one more extraction call — for the answer, and nothing else
+    # exactly one more call — for the answer, and nothing else
     assert spy.calls == [SPARSE, "gritty crime"]
