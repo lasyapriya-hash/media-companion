@@ -1,8 +1,10 @@
-"""Taste-profile service (spec §6.3, FR9).
+"""Taste-profile service (spec §6.3, FR9, Phase 8.3).
 
-A *derived* record — not a trained model. Recomputed from the whole library on
-every rating change and every status change (wired in ``app.services.library``).
-Single-user instance, so there is exactly one row (``SINGLETON_ID``).
+A *derived* record — not a trained model. Recomputed from one account's
+library on every rating change and every status change (wired in
+``app.services.library``). One row per account, keyed on ``user_id``
+(Phase 8.3) — every function here requires it and only ever reads/writes
+that account's own row and that account's own ``library_entry`` rows.
 
 Field definitions (spec §6.3):
 
@@ -19,6 +21,7 @@ Field definitions (spec §6.3):
 """
 from __future__ import annotations
 
+import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -26,7 +29,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.library import LibraryEntry
-from app.models.taste import SINGLETON_ID, TasteProfile
+from app.models.taste import TasteProfile
 
 # How many labels to keep in each ranked "favourite" list.
 FAVOURITE_LIST_LIMIT = 10
@@ -61,9 +64,13 @@ def _completion_rate(completed: int, dropped: int) -> float | None:
     return round(completed / decided, 3) if decided else None
 
 
-def recompute(db: Session) -> TasteProfile:
-    """Rebuild the singleton taste profile from the current library. Commits."""
-    entries = list(db.scalars(select(LibraryEntry)).unique())
+def recompute(db: Session, *, user_id: uuid.UUID) -> TasteProfile:
+    """Rebuild `user_id`'s taste profile from *their* library only. Commits."""
+    entries = list(
+        db.scalars(
+            select(LibraryEntry).where(LibraryEntry.user_id == user_id)
+        ).unique()
+    )
 
     completed_by_genre: dict[str, int] = defaultdict(int)
     dropped_by_genre: dict[str, int] = defaultdict(int)
@@ -138,9 +145,9 @@ def recompute(db: Session) -> TasteProfile:
                 drop_patterns.append(label)
     drop_patterns.sort()
 
-    profile = db.get(TasteProfile, SINGLETON_ID)
+    profile = db.get(TasteProfile, user_id)
     if profile is None:
-        profile = TasteProfile(id=SINGLETON_ID)
+        profile = TasteProfile(user_id=user_id)
         db.add(profile)
 
     profile.favourite_genres = _rank_labels(
@@ -161,9 +168,9 @@ def recompute(db: Session) -> TasteProfile:
     return profile
 
 
-def get_or_compute(db: Session) -> TasteProfile:
-    """Return the singleton profile, computing it once if it has never been built."""
-    profile = db.get(TasteProfile, SINGLETON_ID)
+def get_or_compute(db: Session, *, user_id: uuid.UUID) -> TasteProfile:
+    """Return `user_id`'s profile, computing it once if it's never been built."""
+    profile = db.get(TasteProfile, user_id)
     if profile is None:
-        profile = recompute(db)
+        profile = recompute(db, user_id=user_id)
     return profile

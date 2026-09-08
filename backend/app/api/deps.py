@@ -1,8 +1,9 @@
 """Shared FastAPI dependencies (Phase 8: auth foundation).
 
 `get_current_user` follows the same shape as `app.db.get_db` — a plain
-`Depends`-able callable other routers will opt into later. Not wired into any
-existing route yet.
+`Depends`-able callable. Wired into `api/library.py` (Phase 8.2) and
+`api/taste.py` / `api/recommendations.py` (Phase 8.3); search and
+media-details stay unauthenticated (spec §13).
 """
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer

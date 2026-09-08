@@ -13,6 +13,8 @@ test_recommendations.py.
 """
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
 from app.models.taste import TasteProfile
@@ -113,7 +115,7 @@ def test_filter_pool_removes_wrong_language_candidates_from_any_pool():
     prefs = PreferenceObject(
         genres=["romance"], language=["telugu"], explicit_fields=["genres", "language"]
     )
-    taste = TasteProfile(id=1, favourite_genres=[], favourite_languages=[])
+    taste = TasteProfile(user_id=uuid.uuid4(), favourite_genres=[], favourite_languages=[])
     pool = [
         _movie("LAST_SUNRISE", language="en", genres=["Romance", "Drama"], rating=6.625, popularity=198.0),
         _movie("SHAPE_OF_HEART", language="ja", genres=["Romance"], rating=5.2, popularity=241.0),
@@ -134,7 +136,7 @@ def test_build_candidates_makes_no_screen_calls_for_unresolved_explicit_language
         media_type=["movie"], genres=["romance"], language=["Klingon"],
         explicit_fields=["media_type", "genres", "language"],
     )
-    taste = TasteProfile(id=1, favourite_genres=[], favourite_languages=[])
+    taste = TasteProfile(user_id=uuid.uuid4(), favourite_genres=[], favourite_languages=[])
     candidates, _ = build_candidates(prefs, taste)
     assert candidates == []
     assert spy_tmdb.discover_calls == []  # zero TMDb calls made, not an unrestricted one
@@ -145,6 +147,6 @@ def test_build_candidates_still_queries_normally_when_language_resolves(spy_tmdb
         media_type=["movie"], genres=["romance"], language=["Telugu"],
         explicit_fields=["media_type", "genres", "language"],
     )
-    taste = TasteProfile(id=1, favourite_genres=[], favourite_languages=[])
+    taste = TasteProfile(user_id=uuid.uuid4(), favourite_genres=[], favourite_languages=[])
     build_candidates(prefs, taste)
     assert spy_tmdb.discover_calls == [("tmdb", "movie", ("romance",), "te", None)]

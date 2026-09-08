@@ -1,6 +1,8 @@
 """Phase 6: Open Library -> Google Books fallback wiring (spec §15 D1, §5.4)."""
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
 from app.schemas.media import NormalizedMedia
@@ -82,7 +84,7 @@ def test_candidate_books_fall_back_to_google_books(monkeypatch):
     monkeypatch.setattr(cand, "google_books_client", lambda: gb)
 
     prefs = PreferenceObject(media_type=["book"], genres=["Fantasy"])
-    items, all_failed = build_candidates(prefs, TasteProfile(id=1))
+    items, all_failed = build_candidates(prefs, TasteProfile(user_id=uuid.uuid4()))
     assert not all_failed
     assert [m.source for m in items] == ["google_books"]
 
@@ -94,7 +96,7 @@ def test_candidate_books_all_failed_when_both_sources_down(monkeypatch):
     monkeypatch.setattr(cand, "google_books_client", lambda: _Stub(exc=RuntimeError("down")))
 
     prefs = PreferenceObject(media_type=["book"], genres=["Fantasy"])
-    items, all_failed = build_candidates(prefs, TasteProfile(id=1))
+    items, all_failed = build_candidates(prefs, TasteProfile(user_id=uuid.uuid4()))
     assert items == [] and all_failed is True
 
 

@@ -2,6 +2,8 @@
 (spec §9.1)."""
 from __future__ import annotations
 
+import uuid
+
 from app.models.taste import TasteProfile
 from app.schemas.media import NormalizedMedia
 from app.schemas.preference import PreferenceObject
@@ -17,7 +19,7 @@ def _movie(sid, genres, *, rating=7.0):
 
 
 def _taste(**kw):
-    return TasteProfile(id=1, **kw)
+    return TasteProfile(user_id=uuid.uuid4(), **kw)
 
 
 PREFS = PreferenceObject()  # sparse -> preference_match is 0, penalty is visible

@@ -17,6 +17,7 @@ from tests.test_recommendations import (  # noqa: F401  (wire is a fixture)
 )
 from app.schemas.preference import PreferenceObject
 from app.services.llm.base import GeminiRecommendation
+from tests.conftest import register_and_login
 
 RICH = "a dark, tense crime thriller movie"
 SPARSE = "something for tonight"
@@ -198,6 +199,57 @@ def test_answer_bad_session_id_is_422(client):
     assert client.post(
         "/recommendations/not-a-uuid/answer", json={"answer": "x"}
     ).status_code == 422
+
+
+# --------------------------------------------------------------------------- #
+# Phase 8.3: session ownership (spec §6.1) — same 404-not-a-different-error
+# shape as Phase 8.2's LibraryEntry ownership.
+# --------------------------------------------------------------------------- #
+def test_answer_recommendations_unauthenticated_is_401(client, stocked):
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    sid = client.post("/recommendations", json={"request": SPARSE}).json()["session_id"]
+    with TestClient(app) as anon:
+        resp = anon.post(f"/recommendations/{sid}/answer", json={"answer": "x"})
+        assert resp.status_code == 401
+
+
+def test_new_session_records_its_owner(client, db_session, stocked):
+    sid = client.post("/recommendations", json={"request": RICH}).json()["session_id"]
+
+    from app.models.recommendation import RecommendationSession
+
+    session = db_session.get(RecommendationSession, uuid.UUID(sid))
+    assert session.user_id is not None
+
+
+def test_user_cannot_answer_another_users_session(client, stocked):
+    sid = client.post("/recommendations", json={"request": SPARSE}).json()["session_id"]
+    other = register_and_login(client, "session-iso-a@example.com")
+
+    resp = client.post(
+        f"/recommendations/{sid}/answer", json={"answer": "sci-fi"}, headers=other
+    )
+    assert resp.status_code == 404
+
+    # the owner's own answer still works afterward — the foreign attempt did
+    # not consume the session's one-question allowance or otherwise corrupt it
+    own = client.post(f"/recommendations/{sid}/answer", json={"answer": "sci-fi"})
+    assert own.status_code == 200
+
+
+def test_user_can_answer_their_own_session(client, stocked):
+    other = register_and_login(client, "session-iso-b@example.com")
+    sid = client.post(
+        "/recommendations", json={"request": SPARSE}, headers=other
+    ).json()["session_id"]
+
+    resp = client.post(
+        f"/recommendations/{sid}/answer", json={"answer": "sci-fi"}, headers=other
+    )
+    assert resp.status_code == 200
 
 
 # --------------------------------------------------------------------------- #

@@ -1,8 +1,16 @@
 """Unified library: add items, list them, and edit status/rating/review/
 progress (spec §5.1, FR1, FR2).
 
+Every operation is scoped to the calling user (Phase 8.2, spec §6.1):
+`get_entry` is the single ownership check every other mutation routes
+through, so a `user_id` mismatch is indistinguishable from the entry not
+existing at all (spec: never confirm another user's entry exists).
+`media_item` remains shared/global — never scoped, never duplicated per user.
+
 Taste-profile recompute on rating/status change (FR9, spec §6.3) runs after
 those mutations commit — see the `taste_profile.recompute` calls below.
+Scoped to the same `user_id` as the triggering operation (Phase 8.3): each
+account's library changes only ever rebuild that account's own profile.
 """
 from __future__ import annotations
 
@@ -151,32 +159,44 @@ def add_to_library(
     db: Session,
     item: NormalizedMedia,
     status: LibraryStatus = LibraryStatus.want,
+    *,
+    user_id: uuid.UUID,
 ) -> LibraryEntry:
     media = _get_or_create_media_item(db, item)
 
+    # Phase 8.2: uniqueness is per-user, not global — the same title can be
+    # in two different users' libraries; the underlying media_item is always
+    # reused (never duplicated) via _get_or_create_media_item above.
     if db.scalar(
-        select(LibraryEntry).where(LibraryEntry.media_item_id == media.id)
+        select(LibraryEntry).where(
+            LibraryEntry.user_id == user_id, LibraryEntry.media_item_id == media.id
+        )
     ):
         raise AlreadyInLibrary(str(media.id))
 
-    entry = LibraryEntry(media_item_id=media.id, status=status)
+    entry = LibraryEntry(user_id=user_id, media_item_id=media.id, status=status)
     db.add(entry)
     db.flush()
     if media.type == MediaType.series:
         db.add(SeriesProgress(library_entry_id=entry.id))
     db.commit()
     # A new entry carries a status, so the derived profile may shift (FR9).
-    taste_profile.recompute(db)
+    taste_profile.recompute(db, user_id=user_id)
     db.refresh(entry)
     return entry
 
 
 def list_entries(
-    db: Session, status: str | None = None, media_type: str | None = None
+    db: Session,
+    *,
+    user_id: uuid.UUID,
+    status: str | None = None,
+    media_type: str | None = None,
 ) -> list[LibraryEntry]:
     stmt = (
         select(LibraryEntry)
         .join(MediaItem, LibraryEntry.media_item_id == MediaItem.id)
+        .where(LibraryEntry.user_id == user_id)
         .order_by(LibraryEntry.added_at.desc())
     )
     if status:
@@ -186,17 +206,24 @@ def list_entries(
     return list(db.scalars(stmt).unique())
 
 
-def get_entry(db: Session, entry_id: uuid.UUID) -> LibraryEntry:
+def get_entry(db: Session, entry_id: uuid.UUID, *, user_id: uuid.UUID) -> LibraryEntry:
+    """The single ownership choke point — every other operation below calls
+    this, so scoping it here is enough to scope all of them (spec §6.1).
+
+    An entry that exists but belongs to a different user is reported
+    identically to one that doesn't exist at all — never leaks which case it
+    was (Phase 8.2: don't confirm another user's entry exists).
+    """
     entry = db.get(LibraryEntry, entry_id)
-    if entry is None:
+    if entry is None or entry.user_id != user_id:
         raise EntryNotFound(str(entry_id))
     return entry
 
 
 def update_entry(
-    db: Session, entry_id: uuid.UUID, patch: UpdateEntryRequest
+    db: Session, entry_id: uuid.UUID, patch: UpdateEntryRequest, *, user_id: uuid.UUID
 ) -> LibraryEntry:
-    entry = get_entry(db, entry_id)
+    entry = get_entry(db, entry_id, user_id=user_id)
     fields = patch.model_fields_set
 
     if "status" in fields and patch.status is not None:
@@ -210,22 +237,22 @@ def update_entry(
 
     db.commit()
     if {"status", "rating"} & fields:
-        taste_profile.recompute(db)
+        taste_profile.recompute(db, user_id=user_id)
     db.refresh(entry)
     return entry
 
 
-def remove_from_library(db: Session, entry_id: uuid.UUID) -> None:
+def remove_from_library(db: Session, entry_id: uuid.UUID, *, user_id: uuid.UUID) -> None:
     """Delete the user's `library_entry` (status / rating / review / favourite)
     and its `series_progress`. The cached `media_item` metadata is left intact,
     so the title stays searchable and can still be recommended.
     """
-    entry = get_entry(db, entry_id)  # raises EntryNotFound
+    entry = get_entry(db, entry_id, user_id=user_id)  # raises EntryNotFound
     db.delete(entry)  # series_progress cascades (ORM + FK ondelete)
     db.commit()
     # The removed entry may have carried a status / rating, so the derived
     # taste profile can shift (FR9) — same as add/update.
-    taste_profile.recompute(db)
+    taste_profile.recompute(db, user_id=user_id)
 
 
 def _regular_season_episode_counts(media: MediaItem) -> dict[int, int] | None:
@@ -247,9 +274,9 @@ def _regular_season_episode_counts(media: MediaItem) -> dict[int, int] | None:
 
 
 def update_progress(
-    db: Session, entry_id: uuid.UUID, patch: UpdateProgressRequest
+    db: Session, entry_id: uuid.UUID, patch: UpdateProgressRequest, *, user_id: uuid.UUID
 ) -> LibraryEntry:
-    entry = get_entry(db, entry_id)
+    entry = get_entry(db, entry_id, user_id=user_id)
     if entry.media.type != MediaType.series:
         raise NotASeries(str(entry_id))
 

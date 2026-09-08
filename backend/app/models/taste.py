@@ -1,24 +1,29 @@
-"""`taste_profile` — single derived record, recomputed on rating/status change
-(spec §6.3). Populated by the Phase 3 taste-profile service; this migration only
-creates the table.
+"""`taste_profile` — one derived record per account, recomputed on rating/status
+change (spec §6.3, Phase 8.3). Populated by the taste-profile service; this
+migration only creates the table.
 """
+import uuid
 from datetime import datetime
 
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
-
-# Single-user instance -> exactly one row, keyed on this id.
-SINGLETON_ID = 1
 
 
 class TasteProfile(Base):
     __tablename__ = "taste_profile"
 
-    id: Mapped[int] = mapped_column(
-        sa.Integer, primary_key=True, autoincrement=False, default=SINGLETON_ID
+    # The owning account IS the primary key (Phase 8.3) — this is what makes
+    # "one profile per user" structural rather than an application-level
+    # convention: a second row for the same user is a primary-key violation,
+    # not just a bug someone could introduce later.
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        sa.ForeignKey("user.id", ondelete="CASCADE"),
+        primary_key=True,
     )
     # Ranked lists of labels.
     favourite_genres: Mapped[list] = mapped_column(

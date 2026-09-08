@@ -2,10 +2,10 @@
 
 | | |
 |---|---|
-| **Version** | 1.0 (supersedes draft v0) |
-| **Date** | 2026-08-31 |
+| **Version** | 1.4 (supersedes v1.3 — updates §2, §6.1, §6.3, §9.0, §13, §17 for Phase 8.3: `taste_profile` is now per-account (old singleton discarded, not migrated) and `recommendation_session` is user-owned for new sessions (legacy rows stay permanently NULL-owned); auth is code-complete on taste/recommendation endpoints too, deployment still held for Phase 8.4; see plan.md for the development history) |
+| **Date** | 2026-09-08 |
 | **Owner** | lasyapriya@iisc.ac.in |
-| **Status** | Approved for build |
+| **Status** | Living document — describes the current implementation, not a changelog |
 
 ---
 
@@ -30,7 +30,23 @@ Recommendations are explicitly **not** a "highest-rated first" list.
 
 ## 2. Target User & Problem
 
-A single user — the project owner. No accounts, no login in v0.
+Originally a single user — the project owner, with no accounts and no login.
+An authentication foundation (registration, login, JWT — Phase 8.1, see §13
+and plan.md) now exists, and as of Phase 8.2 the **library is genuinely
+user-owned in the data model and API code**: every library item, its
+status/rating/review/favourite, and its series progress belong to exactly
+one account, and one account can never see or modify another's entries
+(§6.1). As of Phase 8.3, the derived **taste profile and every recommendation
+session are also account-scoped in the data model and API code**: each
+account has its own taste profile (rebuilt only from that account's library),
+and its own recommendation sessions — including which titles get excluded as
+already completed/dropped, and what personalization context Gemini receives
+(§6.1, §6.3, §9.0). The API layer already enforces all of this (every
+library, taste-profile, and recommendation endpoint requires a valid bearer
+token), but that enforcement's rollout to the live production deployment is
+deliberately sequenced with Phase 8.4 (§6.1, §13) so the current frontend —
+which cannot yet send a token — is never left unable to reach any of these
+endpoints.
 
 The user currently splits movie/series tracking and book tracking across
 separate apps, and wants recommendations driven by *"what do I feel like right
@@ -78,6 +94,31 @@ multi-turn conversation flow (Section 8). Deepen in a later cycle.
 - **Review / notes:** free text. Optional.
 - **Progress:** seasons / episodes for series only. Movies have no progress;
   books have status only (no page or percentage tracking in v0).
+  - **Season-aware.** When per-season episode counts are known for a series
+    (§6.1 `season_episode_counts`), the current season is chosen from the
+    series' actual seasons and the current episode is constrained to that
+    season's real episode count — not a freely-typed pair of numbers.
+    Season 0 ("Specials") is excluded from season selection and validation.
+  - **Automatic rollover.** Advancing from the final episode of a season
+    moves to episode 1 of the next season. Advancing from the final episode
+    of the *final* season offers marking the series completed instead of
+    inventing a season that doesn't exist.
+  - **`seasons_completed` is derived, not independently editable.** Whenever
+    `current_season` is supplied, the backend recomputes
+    `seasons_completed = max(current_season - 1, 0)` itself and ignores any
+    client-supplied value for it in that request — the two fields can never
+    disagree. A caller that updates `seasons_completed` alone (without
+    touching `current_season`) keeps the direct legacy behavior.
+  - **Backend-validated independently of the UI.** An episode number outside
+    the selected season's known range, or a season number that doesn't exist
+    for that series, is rejected server-side — the frontend's own
+    constraints are a convenience, not the enforcement.
+  - **Legacy entries** added before per-season data was cached
+    (`season_episode_counts` absent) skip this bound-checking rather than
+    fabricating an episode count that isn't actually known.
+  - **Completed series hide the progress controls** in the UI; the saved
+    progress is not deleted, and switching status back to `in_progress`
+    restores it exactly as it was.
 
 ### 5.2 Media Discovery
 
@@ -94,24 +135,35 @@ multi-turn conversation flow (Section 8). Deepen in a later cycle.
 ### 5.3 Conversational Natural-Language Recommendations (multi-turn)
 
 - User describes mood / situation / constraints in free text.
-- An **LLM** (provider-agnostic; Google Gemini initially) extracts a
-  **structured preference object** (Section 7) from that free text — this is the
-  LLM's only role in the flow.
+- **Gemini is the primary recommendation intelligence**, not just an
+  extractor. One bounded call both (a) extracts a **structured preference
+  object** (Section 7) — the *objective* constraints the user stated — and
+  (b) directly judges which real titles semantically fit the request (genre,
+  mood, tone, vibe, theme), using its own knowledge rather than a fixed tag
+  vocabulary, returning a bounded list of suggested titles with its own
+  one-sentence reason for each. See Section 9.0 for exactly what happens to
+  those suggestions, and Section 9.1/9.2 for the deterministic fallback used
+  when Gemini is unavailable or nothing it suggests survives validation.
 - **Clarification rule:** if the extracted preferences are too sparse for a
-  confident recommendation, the agent asks **exactly one** follow-up question,
-  then proceeds regardless of the answer. Hard cap of one clarifying turn — no
+  confident recommendation **and Gemini did not already return usable
+  suggestions**, the agent asks **exactly one** follow-up question, then
+  proceeds regardless of the answer. Hard cap of one clarifying turn — no
   open-ended back-and-forth. Precise rule in Section 8.3.
 - **Session state** (the request, any clarification Q&A, the extracted
   preference object) lives only for the duration of that recommendation
   session. No cross-session conversation history in v0.
-- Final ranking combines extracted preferences with the taste profile
-  (Section 6.3) via a weighted score for movies/series, or genre / mood-tag
-  overlap for books.
-- Each recommendation carries a **one-sentence reason** that references the
-  actual request (e.g. *"you usually enjoy Korean romantic comedies and this
-  has short, light episodes with a similar tone"*), assembled deterministically
-  from the matched signals (Section 9.4) — not written by the LLM.
-- Recommendations must **not** simply be the highest-rated items (Section 9.3).
+- On the primary (Gemini) path, ranking is **Gemini's own suggestion order**
+  — the deterministic weighted score (Section 9.1/9.2) is not computed for
+  these results. On the deterministic fallback path, ranking combines extracted
+  preferences with the taste profile (Section 6.3) via the weighted score for
+  movies/series, or genre / mood-tag overlap for books, exactly as before.
+- Each recommendation carries a **one-sentence reason**. On the primary path
+  this is Gemini's own reason for that title, used as-is. On the fallback
+  path it is assembled deterministically from the matched signals (Section
+  9.4), as before.
+- Recommendations must **not** simply be the highest-rated items (Section 9.3)
+  — this remains true on both paths (Gemini is instructed not to pad its list
+  with a weak match, and the fallback's novelty term is not rating-driven).
 
 ### 5.4 Availability
 
@@ -125,10 +177,33 @@ multi-turn conversation flow (Section 8). Deepen in a later cycle.
 
 ## 6. Data Model
 
-Persistence is **Postgres**. Single-user instance, so there is no `users`
-table and each real-world item has at most one library entry.
+Persistence is **Postgres**. As of Phase 8.2, `library_entry` carries a
+`user_id` (Section 6.1): each real-world item can have one library entry
+**per account**, not one globally — the same title can sit in two different
+users' libraries simultaneously, each with independent status, rating,
+review, and progress. `media_item` (the cached provider metadata) remains
+shared/global by design: it is never duplicated per user, only referenced by
+however many users' `library_entry` rows point at it. As of Phase 8.3,
+`taste_profile` carries `user_id` as its primary key (one row per account,
+enforced structurally) and `recommendation_session` carries a `user_id`
+column (nullable — see its entity section below for why).
 
 ### 6.1 Entities
+
+#### `user` — an account (Phase 8.1)
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | uuid, PK | |
+| `email` | varchar(320) | normalized (stripped + lowercased) before storage; unique |
+| `hashed_password` | text | bcrypt |
+| `created_at` | timestamptz | |
+
+**Constraints:** `unique (email)`. `library_entry.user_id` references this
+table as of Phase 8.2 (`ON DELETE CASCADE` — deleting a user deletes their
+library entries and, transitively, their series progress). As of Phase 8.3,
+`taste_profile.user_id` and `recommendation_session.user_id` also reference
+it (both `ON DELETE CASCADE`).
 
 #### `media_item` — cached external metadata
 
@@ -149,6 +224,7 @@ table and each real-world item has at most one library entry.
 | `seasons` | int, null | series |
 | `episodes` | int, null | series |
 | `episode_runtime_minutes` | int, null | series |
+| `season_episode_counts` | jsonb, null | series — `[{season_number, episode_count, name}]` from the provider; includes season 0 ("Specials") for completeness, but season 0 is excluded from progress selection/validation (Section 5.1). `null` for entries added before this field existed — treated as "unknown," never fabricated |
 | `author` | text, null | books |
 | `page_count` | int, null | books |
 | `mood_tags` | text[] | derived tone/mood tags (see 6.4); used for matching |
@@ -157,11 +233,12 @@ table and each real-world item has at most one library entry.
 
 **Constraints:** `unique (source, source_id)`.
 
-#### `library_entry` — the user's relationship to an item
+#### `library_entry` — one account's relationship to an item (Phase 8.2: user-owned)
 
 | Field | Type | Notes |
 |---|---|---|
 | `id` | uuid, PK | |
+| `user_id` | uuid, FK → `user.id`, not null | the owning account (Phase 8.2); `ON DELETE CASCADE` |
 | `media_item_id` | uuid, FK → `media_item.id` | |
 | `status` | enum `want` \| `in_progress` \| `completed` \| `dropped` | required |
 | `favourite` | bool, default false | |
@@ -170,19 +247,52 @@ table and each real-world item has at most one library entry.
 | `added_at` | timestamptz | |
 | `updated_at` | timestamptz | |
 
-**Constraints:** `unique (media_item_id)`.
+**Constraints:** `unique (user_id, media_item_id)` — a title can appear at
+most once in a given account's library, but the same title can independently
+appear in any number of *other* accounts' libraries, each referencing the
+same shared `media_item` row (never a duplicate). This replaced the old
+global `unique (media_item_id)` constraint via a deliberately two-step
+Phase 8.2 migration: `47cf8fa2576e` adds `user_id` **nullable** and swaps the
+constraint immediately (safe even while every row is still unowned — a
+NULL never collides with another NULL under Postgres unique-constraint
+semantics), then a separate, later migration (`1c240902dee9`) tightens
+`user_id` to NOT NULL. Nothing backfills automatically and no placeholder
+account is ever created — pre-existing rows are assigned to a real
+registered account by running `python -m app.scripts.claim_legacy_library`
+once, between those two migrations (see plan.md Phase 8.2 for the exact
+sequence and why). The NOT-NULL migration deliberately fails the deploy if
+any row is still unclaimed when it runs, rather than silently inventing an
+owner for it.
+>
+> **Ownership enforcement (Phase 8.2, code complete — deployment held for
+> Phase 8.4):** every `/library*` endpoint requires a valid bearer token
+> (`get_current_user`, Section 13) and every service operation — list, get,
+> update, update-progress, remove — is scoped to `current_user.id` through a
+> single ownership check. Requesting or mutating another account's entry
+> returns the same 404 as a nonexistent id; the API never confirms that
+> another account's entry exists. This is implemented and tested, but its
+> *deployment* to production is intentionally held until it can ship
+> alongside Phase 8.4's frontend token support — the live frontend cannot
+> yet attach an `Authorization` header, so deploying this enforcement any
+> earlier would 401 every request the current production frontend makes.
+> As of Phase 8.3, `taste_profile` and `recommendation_session` are scoped
+> the same way — see their entity sections below and §13.
 
 #### `series_progress` — series only
 
 | Field | Type | Notes |
 |---|---|---|
 | `library_entry_id` | uuid, PK, FK → `library_entry.id` | |
-| `seasons_completed` | int, default 0 | |
-| `current_season` | int, null | |
-| `current_episode` | int, null | |
+| `seasons_completed` | int, default 0 | **server-derived** when `current_season` is set on the same request (`= max(current_season - 1, 0)`); the client's own value is ignored in that case — see Section 5.1 |
+| `current_season` | int, null | validated against `media_item.season_episode_counts` when known (Section 5.1); season 0 is never a valid value here |
+| `current_episode` | int, null | validated against the selected season's real episode count when known |
 | `updated_at` | timestamptz | |
 
-Rows exist only for entries whose `media_item.type = 'series'`.
+Rows exist only for entries whose `media_item.type = 'series'`. No `user_id`
+of its own — ownership is inherited automatically through its 1:1
+`library_entry_id` FK (`ON DELETE CASCADE`), so Phase 8.2's ownership checks
+on `library_entry` already cover it (ability to read/write a series' progress
+requires owning its `library_entry`, same as any other field on it).
 
 #### `recommendation_session` — optional, non-durable
 
@@ -193,6 +303,7 @@ rows are **not** surfaced as user-visible history and MAY be pruned freely.
 | Field | Type | Notes |
 |---|---|---|
 | `id` | uuid, PK | session id returned to the client |
+| `user_id` | uuid, FK → `user.id`, **nullable** | the owning account (Phase 8.3); see below for why this stays nullable |
 | `original_request` | text | |
 | `preference_object` | jsonb | latest extracted preferences (Section 7) |
 | `clarification_question` | text, null | the single question, if one was asked |
@@ -201,6 +312,21 @@ rows are **not** surfaced as user-visible history and MAY be pruned freely.
 | `results` | jsonb, null | ranked recommendation payload |
 | `state` | enum (Section 8.1) | |
 | `created_at` | timestamptz | |
+
+**Ownership (Phase 8.3):** `POST /recommendations` always sets `user_id` to
+the caller; `POST /recommendations/{id}/answer` checks it the same way
+`library.get_entry` checks `LibraryEntry.user_id` (Phase 8.2) — a session
+that exists but belongs to a different account returns the identical 404 as
+one that doesn't exist, and the session UUID's own unguessability is
+deliberately *not* relied on as the only protection.
+
+`user_id` is **nullable by design, permanently** — not a transitional state
+like `library_entry`'s Phase 8.2 migration pair. This table is explicitly
+debug/prunable data (this section, and §8.4): sessions created before Phase
+8.3 have no owner and are left that way forever rather than backfilled via a
+claim step. A `NULL`-owned row can never match any authenticated caller's
+`user_id`, so it simply becomes permanently unreachable through the API —
+the intended outcome for orphaned legacy rows, not a gap.
 
 ### 6.2 Enumerations
 
@@ -214,8 +340,23 @@ rows are **not** surfaced as user-visible history and MAY be pruned freely.
 
 ### 6.3 Taste Profile (derived, not a trained model)
 
-Recomputed on every rating change and every status change. Stored as a single
-derived record (table or materialised view).
+Recomputed on every rating change and every status change, scoped to the
+account that made the change. **One row per account (Phase 8.3)** —
+`taste_profile.user_id` (FK → `user.id`, `ON DELETE CASCADE`) is the primary
+key itself, so "one profile per account" is a structural guarantee, not a
+convention: a second row for the same account is a primary-key violation.
+`taste_profile.recompute()`/`get_or_compute()` both require `user_id` and
+only ever read that account's own `library_entry` rows — one account's
+library changes never affect another's profile.
+
+Migration note: the pre-8.3 implementation was a genuine singleton (one row
+for the whole application, computed from every `library_entry` regardless of
+account). That row was **discarded, not migrated**, when Phase 8.3 shipped —
+it is fully derived/cache data with no real owner to assign it to (it was
+computed from every account's combined library, not any one account's), so
+each account's profile is instead rebuilt fresh, correctly, the next time
+`get_or_compute()` runs for them. This did not touch `library_entry` or
+`series_progress` in any way.
 
 | Signal | Definition |
 |---|---|
@@ -227,8 +368,12 @@ derived record (table or materialised view).
 | `drop_patterns` | genres/languages with completion_rate below a low threshold |
 | `computed_at` | timestamptz |
 
-Used as a scoring input for **movie/series** recommendations. For **books** in
-v0 it is used only as a light tiebreaker, if at all.
+Used as a scoring input for **movie/series** recommendations (the
+deterministic fallback, Section 9.1) and, as of Phase 8.3, as the
+personalization context summarized into the **Gemini-primary path's** prompt
+(`taste_context`, Section 9.0) — always built from the calling account's own
+profile only, never another account's. For **books** in v0 it is used only
+as a light tiebreaker, if at all.
 
 ### 6.4 Derived tags & bucket mappings
 
@@ -262,13 +407,21 @@ produces from the free-text request. All fields optional; absent fields are
   "intensity":     "low" | "medium" | "high" | null,
   "language":      string[],
   "release_period": { "from_year": int, "to_year": int } | "recent" | "classic" | null,
+  "rating":        { "gte": num, "gt": num, "lte": num, "lt": num } | null,
+                               // explicit numeric bound on external_rating (0-10);
+                               // inclusive/exclusive carried per-field ("above 7.5" -> gt,
+                               // "at least 7.5" -> gte); a HARD filter, same as avoid
   "avoid":         string[],   // genres / themes / content to hard-exclude
   "explicit_fields": string[]  // which of the above the user stated outright
                                // (vs. inferred) — drives the sparsity check
 }
 ```
 
-`avoid` is always a **hard filter**, never a soft signal.
+`avoid` and an explicit `rating` bound are always **hard filters**, never a
+soft signal. So are an explicit `language` and an explicit `media_type` or
+`release_period` (Section 9.1/9.0) — an explicit language that fails to
+resolve to a known code is treated as a hard filter nothing can satisfy, never
+silently widened into an unrestricted query.
 
 ---
 
@@ -318,13 +471,20 @@ produces from the free-text request. All fields optional; absent fields are
 - `ranking` **always** produces a non-empty result list (falling back per
   8.3) unless the underlying APIs are all unavailable, which routes to
   `error`.
-- Candidate generation (querying TMDb / book APIs), scoring, and ranking are
-  driven by the preference object and the taste profile in deterministic
-  backend code — **never** by the LLM. The LLM's **only** role is extracting the
-  preference object from free text (Section 7), and it always sits behind a
-  deterministic fallback (Section 8.3). The single clarifying question
-  (Section 8.3) and every per-result reason (Section 9.4) are produced from
-  templates over structured data, not by the LLM.
+- Gemini is the **primary** source of both the preference object and the
+  candidate title list (Section 5.3, Section 9.0) — this is a deliberate
+  architecture choice, not a gap. What deterministic backend code guarantees
+  instead: every Gemini-suggested title is resolved against a real metadata
+  provider before it can be shown (Section 9.0.1), every *objective* fact
+  about it (language, media type, rating, release period, whether it's
+  already in the excluded collection) is independently verified against that
+  provider's data — Gemini is never trusted for these (Section 9.0.2) — and
+  whenever Gemini is unavailable, returns nothing usable, or every suggestion
+  fails resolution/validation, candidate generation, scoring, and ranking fall
+  back to the fully deterministic pipeline of Section 9.1/9.2, driven by the
+  preference object and the taste profile with no LLM involvement at all. The
+  single clarifying question (Section 8.3) is always template-produced, never
+  by the LLM, on either path.
 
 ### 8.3 Sparsity rule (precise)
 
@@ -337,7 +497,13 @@ Preferences are **sufficient** — proceed straight to `ranking` — if **any** 
 1. `genres` is non-empty; **or**
 2. `mood` is non-empty **and** at least one of
    `{tone, media_type, length, language}` is populated; **or**
-3. three or more fields in the richness set are populated.
+3. three or more fields in the richness set are populated; **or**
+4. Gemini's own primary-path call (Section 9.0) already returned at least one
+   usable title suggestion — Gemini being confident enough to suggest
+   something is itself treated as sufficient, regardless of how sparse the
+   *structured* preference object looks, since the old richness heuristic was
+   designed for a tag-matching engine that no longer decides relevance on
+   this path.
 
 Otherwise preferences are **sparse** → ask exactly one clarifying question. That
 question is selected deterministically from a fixed templated set, keyed on
@@ -367,13 +533,83 @@ and go to `ranking` **unconditionally** — even if still sparse.
 
 ## 9. Recommendation Scoring
 
-Candidates come from external-API queries built from the preference object
-(genre filters, language, release window, type). The candidate pool
-**excludes** any item whose `library_entry.status` is `completed` or
-`dropped`, and **hard-excludes** anything matching `avoid`. Items already in
-the library with status `want` are eligible.
+There are now two paths to a result list: the **primary** (Gemini-selected)
+path, and the **deterministic fallback**. Both apply the same hard exclusion
+of anything with `library_entry.status = completed` or `dropped`; on the
+fallback path `avoid` is also a keyword-matched hard exclusion (Section 9.1),
+while on the primary path `avoid` is instead given to Gemini as an instruction
+not to suggest such a title in the first place (Section 9.0.2) — reusing the
+fallback's keyword filter there would recreate the same "provider tag decides
+semantic relevance" problem this architecture exists to avoid for genre.
 
-### 9.1 Movies / series
+### 9.0 Primary path: Gemini-selected candidates
+
+Gemini (Section 5.3) judges semantic fit itself — genre, mood, tone, theme,
+vibe — using its own knowledge, and returns a bounded list (currently up to
+12) of `{title, media_type, year, reason}` suggestions in the order it judges
+them to fit. That order is preserved as the final ranking; the deterministic
+weighted score of Section 9.1/9.2 is **not** computed for candidates on this
+path. Gemini's own `reason` string is used as the displayed reason, as-is
+(Section 9.4). Gemini is never asked for, and never trusted for, a rating,
+runtime, streaming availability, or provider ID — those are facts, supplied
+only by resolving against the real metadata providers below.
+
+Alongside the request text, the call includes a short **taste-context**
+summary (favourite genres/languages, drop patterns — Section 6.3) generated
+from the calling account's own taste profile, explicitly framed as
+background only — it never overrides or substitutes for anything the request
+states outright. As of Phase 8.3 this is the calling account's own profile,
+never another account's (Section 6.3).
+
+#### 9.0.1 Title resolution (hallucination guard)
+
+Each suggested title is looked up by name (+ approximate year, if Gemini gave
+one) against a real provider — TMDb for movies/series, Open Library then
+Google Books for books — using the provider's title-search endpoint, not a
+genre/filter query. A title/year confidence check (plain string similarity,
+not a semantic classifier) must clear a threshold for the match to be
+accepted; a suggestion with no confident match is **discarded** — never shown,
+never assumed real. This is the only defense against a fabricated or
+misremembered title: it must round-trip through a real provider and match
+with confidence, or it doesn't appear.
+
+#### 9.0.2 Objective validation
+
+Once resolved, a candidate must still pass every constraint below —
+Gemini's semantic judgment is authoritative for *fit*, never for these facts:
+
+- an explicit **language** (Section 7) matches the resolved item's actual
+  language;
+- an explicit **media type** matches the resolved item's actual type;
+- an explicit **rating** bound (Section 7) is met by the resolved item's real
+  `external_rating`;
+- an explicit **release period** is met by the resolved item's real year;
+- the resolved item is not already excluded by collection status
+  (`completed`/`dropped`);
+- the resolved item clears the same minimum-quality floor as the fallback
+  path (Section 9.3).
+
+**Deliberately not checked here: genre.** Provider genre tags were found to be
+too coarse/incomplete to arbitrate a semantic request (e.g. a real, correctly
+Telugu-language romantic drama may carry no "Romance" tag at all) — the
+fallback path's genre matching (Section 9.1) is not reused on this path for
+that reason. `hits_avoid`'s keyword matching (Section 9.1) is likewise not
+reused here — `avoid` terms are instead given to Gemini as an instruction, per
+above. If nothing Gemini suggested survives resolution and this validation,
+the request falls through to the deterministic fallback below — the user is
+never shown an empty result merely because the primary path came up short.
+
+### 9.1 Deterministic fallback — movies / series
+
+Used when Gemini is unavailable, times out, returns malformed output, or
+nothing it suggested survives Section 9.0.1/9.0.2. Candidates come from
+external-API queries built from the preference object (genre filters,
+language, release window, type); the candidate pool excludes
+`completed`/`dropped` items and hard-excludes anything matching `avoid`
+(keyword match against title/description/genre/mood-tags), an explicit
+`rating` bound, an explicit `language`, or an explicit `media_type` — all
+hard filters, not merely down-ranked. Items already in the library with
+status `want` are eligible.
 
 ```
 score = w1 · preference_match
@@ -388,17 +624,26 @@ score = w1 · preference_match
 - **taste_profile_match** — genre affinity + language affinity + predicted
   personal rating from `avg_rating_by_genre` / `avg_rating_by_language`,
   normalised to 0–1.
-- **novelty_term** — small positive weight for items that are *not* top-of-
-  popularity / not top-`external_rating`, so the list cannot collapse to
-  "most popular". 0–1.
+- **novelty_term** — a blend of two things, both 0–1: obscurity (lower
+  provider popularity → higher novelty, so the list cannot collapse to "most
+  popular") and a quality prior from `external_rating`. The rating half is
+  monotonic — a higher rating can only raise this term, never lower it. (An
+  earlier version of this term let a low rating masquerade as "novelty" and
+  actively outranked well-reviewed candidates; that inversion is fixed —
+  rating is a quality signal here, never a punishment.) With no preference or
+  taste signal at all (a fully open-ended request), this term is quality
+  alone, so an unconstrained list still favours a well-reviewed pick over a
+  merely-obscure one.
 - **penalty** — additive deductions for soft-avoid theme hits and for genres
   in the user's `drop_patterns`.
 
 Suggested starting weights (tune during build): `w1 = 0.50`, `w2 = 0.35`,
-`w3 = 0.15`. `external_rating` never enters the sort key directly — only as a
-minimum-quality floor to drop obvious junk.
+`w3 = 0.15`. `external_rating` never enters the sort key as a primary
+criterion — only as the minimum-quality floor (drops obvious junk) and, at
+low weight and always in the quality-favouring direction, inside
+`novelty_term` above.
 
-### 9.2 Books (v0, lighter)
+### 9.2 Deterministic fallback — books (v0, lighter)
 
 ```
 score = genre_overlap + mood_tag_overlap
@@ -410,21 +655,34 @@ Both terms 0–1. Taste profile enters only as a tiebreaker
 
 ### 9.3 "Not highest-rated" guarantee
 
-- The ranking sort key is `score`, never `external_rating` or `rating`.
-- `external_rating` is capped to a low-weight quality floor only.
-- **Acceptance test:** issue a request whose mood/tone deliberately conflicts
-  with the highest-rated candidate; assert that candidate is not ranked #1.
+- **Fallback path:** the ranking sort key is `score`, never `external_rating`
+  or `rating` directly; `external_rating` only ever pulls a candidate up
+  within the low-weight `novelty_term`, never used as the primary sort key.
+- **Primary path:** ranking is Gemini's own order (Section 9.0), which is
+  instructed not to pad the list with a weak or unrelated match — Gemini may
+  legitimately rank a lower-rated title first when it's a better semantic
+  fit, which is the point.
+- `external_rating` is capped to a low-weight quality floor on both paths
+  (Section 9.0.2, Section 9.1).
+- **Acceptance test (fallback path):** issue a request whose mood/tone
+  deliberately conflicts with the highest-rated candidate; assert that
+  candidate is not ranked #1.
 
 ### 9.4 Output
 
 - Top **N** results (N in Section 15; default 8).
 - Each result: the `media_item` display fields, the availability block
-  (Section 5.4), the `score`, and a **one-sentence reason** assembled
-  **deterministically** from the structured match explanation — a template over
-  which sub-signals matched (genres, mood/tone, length, language, period) plus
-  one taste-profile fact. Reasons must be request-specific, not generic;
-  because the template names the request's own matched fields, this holds with
-  no LLM call.
+  (Section 5.4), the `score`, and a **one-sentence reason**. On the
+  **fallback** path this is assembled deterministically from the structured
+  match explanation — a template over which sub-signals matched (genres,
+  mood/tone, length, language, period) plus one taste-profile fact. On the
+  **primary** path this is Gemini's own reason for that title, used verbatim
+  — not a template, and not re-derived from provider tags. Reasons must be
+  request-specific, not generic; on the fallback path the template names the
+  request's own matched fields (no LLM call), and on the primary path Gemini
+  is explicitly prompted to give a fit-specific sentence rather than a
+  generic one — and never a rating/runtime/availability claim, since those
+  aren't facts Gemini is trusted for (Section 9.0.2).
 
 ---
 
@@ -432,13 +690,15 @@ Both terms 0–1. Taste profile enters only as a tiebreaker
 
 | Source | Use |
 |---|---|
-| **TMDb** | movie/series search, metadata, watch providers (region IN) |
-| **Open Library** *(primary)* or **Google Books** *(fallback / primary — 15)* | book search and metadata |
-| **LLM provider** — Google **Gemini** initially (a current free-tier model), behind a provider-agnostic interface so it can be swapped | **Only** two bounded JSON calls: natural-language request → structured preference object (Section 7), and the optional `mood_tags` classification (Section 6.4). **Not** used for candidate generation, search, ranking, the clarifying question, or reason text. Always behind a deterministic fallback — the app is fully usable with **no LLM provider and no Anthropic access**. |
+| **TMDb** | movie/series search/discover, metadata, watch providers (region IN); also resolves Gemini-suggested movie/series titles by name (Section 9.0.1) |
+| **Open Library** *(primary)* or **Google Books** *(fallback / primary — 15)* | book search and metadata; also resolves Gemini-suggested book titles by name (Section 9.0.1) |
+| **LLM provider** — Google **Gemini** (currently `gemini-3.5-flash-lite`, pinned rather than tracking `-latest`), behind a provider-agnostic interface so it can be swapped | The **primary** recommendation intelligence (Section 5.3, 9.0): one bounded call per turn both extracts the structured preference object (Section 7) and judges semantic fit, returning a bounded candidate title list with reasons. **Never trusted for objective facts** (rating, runtime, availability, existence) — those are always verified against the data-API providers (Section 9.0.2). The optional `mood_tags` classification (Section 6.4) is a separate, second bounded call type. Always behind a deterministic fallback (Section 9.1/9.2) — the app is fully usable with **no LLM provider and no Anthropic access**, just with tag-matched rather than semantic candidates. |
 
-Keeping candidate generation on the data APIs bounds cost and latency; keeping
-the LLM to one small extraction call with a deterministic fallback means the
-deployed app never depends on paid or personal-subscription LLM access.
+Keeping every *objective* fact verified against the data APIs — never taken on
+Gemini's word — bounds both cost/latency and the risk of a hallucinated or
+factually wrong result reaching the user; keeping a fully deterministic
+fallback means the deployed app never depends on paid or personal-subscription
+LLM access, even though Gemini is now the primary path when available.
 
 ---
 
@@ -483,19 +743,31 @@ deployed app never depends on paid or personal-subscription LLM access.
 | Backend | FastAPI (Python) |
 | Frontend | React / Next.js |
 | Database | Postgres — persistence must survive redeploys; no local or in-memory-only storage |
-| LLM | Provider-agnostic interface; Google Gemini (free-tier model) initially. Used only for request → preference extraction and the optional `mood_tags` call. Optional — a deterministic fallback keeps the engine working with no LLM access; no Anthropic / personal-subscription dependency |
-| Auth | none — single-user instance |
-| Deployment | backend + Postgres on Render or Railway; frontend on Vercel, or a single combined target (Section 15) |
+| LLM | Provider-agnostic interface; Google Gemini (`gemini-3.5-flash-lite`) is the **primary** recommendation intelligence (Section 5.3, 9.0), not just extraction. The optional `mood_tags` call (Section 6.4) is a separate, second bounded call type. Optional — a fully deterministic fallback keeps the engine working with no LLM access; no Anthropic / personal-subscription dependency |
+| Auth | `User` model (UUID id, unique normalized email, bcrypt-hashed password), `POST /auth/register`, `POST /auth/login` (issues an HS256 JWT, default 7-day expiry), and a `get_current_user` dependency that verifies a bearer token and loads the user (Phase 8.1). **Phase 8.2** code requires it on every `/library*` endpoint, and **Phase 8.3** code requires it on `GET /taste-profile` and both `/recommendations*` endpoints too — an unauthenticated request gets 401, and an authenticated request only ever sees/modifies its own library entries, taste profile, and recommendation sessions (Section 6.1) — but that enforcement's *deployment* is deliberately held until Phase 8.4 ships the frontend's token support in the same release, so the live app is never left unable to call any of these endpoints. Search and media-details stay unauthenticated and unscoped — they're stateless, provider-facing lookups with no per-account data. |
+| Deployment | backend + Postgres on Render; frontend on Vercel (Section 15 D2 resolved to split) |
 
 ---
 
 ## 14. Deployment Requirements
 
 - A working **public URL**; no local-only functionality.
-- Environment variables for **all** API keys (TMDb, book API, and the LLM
-  provider — `GEMINI_API_KEY` initially). Never committed to the repo, never
+- Environment variables for **all** API keys (TMDb, book API, the LLM
+  provider — `GEMINI_API_KEY` — and, since Phase 8.1, `JWT_SECRET_KEY` /
+  `JWT_ALGORITHM` / `JWT_EXPIRES_MINUTES`). Never committed to the repo, never
   shipped to the client bundle. The backend must start and serve
   recommendations even when the LLM provider key is absent.
+
+**Current live deployment:**
+
+| | |
+|---|---|
+| Frontend | https://media-companion-silk.vercel.app |
+| Backend | https://media-companion-api.onrender.com |
+| Database | Render Postgres |
+
+The backend calls Gemini, TMDb, and Open Library / Google Books as described
+in Section 10.
 
 ---
 
@@ -504,12 +776,12 @@ deployed app never depends on paid or personal-subscription LLM access.
 | # | Decision | Default if undecided |
 |---|---|---|
 | D1 | Book API: Open Library vs Google Books as primary | Open Library primary, Google Books fallback |
-| D2 | Deploy topology: split (Render/Railway + Vercel) vs combined | split |
+| D2 | Deploy topology: split (Render/Railway + Vercel) vs combined | **Resolved: split** — Render (backend + Postgres) + Vercel (frontend), see Section 14 |
 | D3 | `N` — number of recommendations returned | 8 |
-| D4 | Scoring weight vector `w1/w2/w3` and sub-signal weights | 0.50 / 0.35 / 0.15 |
+| D4 | Scoring weight vector `w1/w2/w3` and sub-signal weights | 0.50 / 0.35 / 0.15 — **applies to the deterministic fallback only** (Section 9.1); the primary Gemini path is not weighted-scored at all (Section 9.0) |
 | D5 | Rating input widget granularity (slider vs 10 half-star clicks) | slider, 0.5 steps |
 | D6 | Whether `mood_tags` classification is precomputed on add vs lazily on first recommendation use | on add |
-| D7 | LLM provider + model for preference extraction | Google Gemini, a current free-tier model (e.g. `gemini-2.5-flash`), behind a swappable interface; deterministic fallback always present |
+| D7 | LLM provider + model | **Resolved:** Google Gemini, `gemini-3.5-flash-lite` — pinned, not `-latest` (an earlier pinned model, `gemini-2.5-flash`, was retired for new API keys/tiers, and the "obvious" replacement Google suggested turned out to be a slower "thinking" model unsuitable for this bounded call; `gemini-3.5-flash-lite` has no reasoning-token overhead). Now used for the **primary recommendation call** (Section 9.0), not only extraction; deterministic fallback always present. |
 
 ---
 
@@ -542,14 +814,25 @@ deployed app never depends on paid or personal-subscription LLM access.
 
 - Book page / percentage progress tracking.
 - Full taste-profile scoring for book recommendations.
-- Multi-user accounts / login.
+- **Full multi-user data isolation** — the library (Phase 8.2), taste
+  profile, and recommendation sessions (Phase 8.3) are all user-owned and
+  authenticated in the data model and API code (Section 6.1, Section 13).
+  What remains is Phase 8.4 (frontend login/token support) and actually
+  deploying the auth enforcement live — until then the product still
+  functions as one shared library/profile in production, since the current
+  frontend cannot send a token at all (plan.md).
 - Social features (sharing, following, messaging).
 - Streaming or hosting media content.
 - Open-ended (unbounded) conversational clarification.
 - A trained / from-scratch ML recommendation model.
-- LLM-generated candidate lists, ranking, or reason text — the LLM only
-  interprets the request into structured preferences.
 - Cross-session conversation history.
+
+**No longer out of scope, now shipped:** LLM-generated candidate lists and
+reason text — Gemini is now the primary source of both (Section 9.0), with
+every objective fact independently verified and every suggestion resolved
+against a real provider before it can be shown (Section 9.0.1/9.0.2). What
+remains true: the LLM never computes the deterministic `score` (Section 9.1)
+and never decides the single clarifying question's wording.
 
 ---
 
@@ -560,5 +843,7 @@ deployed app never depends on paid or personal-subscription LLM access.
 | Multi-turn conversation state adds real complexity — session handling and the exact one-question rule need precise logic. The main implementation-complexity risk in v0. | State machine and sparsity rule are fully specified (Sections 8.1–8.3); `clarification_used` is a hard invariant; fallback path guarantees a result. |
 | Book API coverage/quality varies more than TMDb's. | Lighter v0 scope for books deliberately absorbs this; primary/fallback API pair (D1). |
 | TMDb watch-provider data is region-specific and sometimes incomplete. | "availability unknown" fallback state exists specifically for this. |
-| LLM latency or unavailability (Gemini free tier — rate limits, cold calls) could slow a turn past ~8 s or fail outright. | The LLM does only preference extraction — one bounded JSON call with a single short timeout, off the candidate / ranking / reason paths. A deterministic keyword+vocabulary parser produces the preference object with no network call, so recommendations still return. `mood_tags` precomputed on add (D6) and also optional. |
-| The deployed app must not depend on a personal Claude subscription or paid Anthropic access. | LLM access is optional and behind a provider-agnostic interface (Gemini free tier initially). Every LLM-touched feature — preference extraction and `mood_tags` — has a deterministic path. Anthropic is never a required dependency. |
+| LLM latency or unavailability (Gemini free tier — rate limits, cold calls) could slow a turn past ~8 s or fail outright. Gemini is now the *primary* recommendation source, not just extraction, so this risk is larger than originally scoped. | One bounded JSON call per turn, single short timeout. On any failure, malformed output, or an empty/all-discarded suggestion list, the engine falls through to the fully deterministic pipeline (Section 9.1/9.2) with no network call — recommendations still return either way. `mood_tags` precomputed on add (D6) and also optional. |
+| A Gemini-suggested title could be hallucinated or misremembered. | Every suggestion must resolve against a real provider by title/year with a confidence check before it can be shown (Section 9.0.1); an unconfident or unresolved suggestion is discarded, never displayed. |
+| Provider genre tags are too coarse/incomplete to arbitrate a semantic request (e.g. a correctly Telugu-language romantic drama with no "Romance" tag). | Genre is deliberately not hard-validated on the primary path (Section 9.0.2) — Gemini's own semantic judgment is authoritative for fit; only objective, provider-verifiable facts (language, media type, rating, release period, collection status) are checked. |
+| The deployed app must not depend on a personal Claude subscription or paid Anthropic access. | LLM access is optional and behind a provider-agnostic interface (Gemini free tier). Every LLM-touched feature — the primary recommendation call and `mood_tags` — has a deterministic path. Anthropic is never a required dependency. |

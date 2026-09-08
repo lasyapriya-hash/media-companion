@@ -2,10 +2,14 @@
 
 * profile fields are correct over a seeded library
 * every rating change and every status change triggers a recompute
+* Phase 8.3: profiles are per-account, isolated, and auth-required
 """
 import pytest
+from fastapi.testclient import TestClient
 
+from app.main import app
 from app.schemas.media import NormalizedMedia
+from tests.conftest import register_and_login
 
 
 def _item(**over):
@@ -24,8 +28,8 @@ def _item(**over):
     return NormalizedMedia(**base).model_dump()
 
 
-def _add(client, **over):
-    resp = client.post("/library", json={"item": _item(**over)})
+def _add(client, *, headers=None, **over):
+    resp = client.post("/library", json={"item": _item(**over)}, headers=headers)
     assert resp.status_code == 201, resp.text
     return resp.json()["id"]
 
@@ -104,7 +108,7 @@ def test_status_change_triggers_recompute(client, monkeypatch):
     real_recompute = tp.recompute
     monkeypatch.setattr(
         "app.services.library.taste_profile.recompute",
-        lambda db: calls.append("x") or real_recompute(db),
+        lambda db, *, user_id: calls.append("x") or real_recompute(db, user_id=user_id),
     )
 
     entry_id = _add(client, source_id="S1", genres=["Thriller"])
@@ -124,7 +128,7 @@ def test_rating_change_triggers_recompute(client, monkeypatch):
     real_recompute = tp.recompute
     monkeypatch.setattr(
         "app.services.library.taste_profile.recompute",
-        lambda db: calls.append("x") or real_recompute(db),
+        lambda db, *, user_id: calls.append("x") or real_recompute(db, user_id=user_id),
     )
 
     entry_id = _add(client, source_id="R1", genres=["Mystery"], language="fr")
@@ -142,10 +146,68 @@ def test_review_only_change_does_not_recompute(client, monkeypatch):
     calls: list[str] = []
     monkeypatch.setattr(
         "app.services.library.taste_profile.recompute",
-        lambda db: calls.append("x"),
+        lambda db, *, user_id: calls.append("x"),
     )
     entry_id = _add(client, source_id="RV1")
     calls.clear()
 
     client.patch(f"/library/{entry_id}", json={"review": "some notes"})
     assert not calls, "a review-only edit should not recompute the profile"
+
+
+# --------------------------------------------------------------------------- #
+# Phase 8.3: authentication + per-account isolation
+# --------------------------------------------------------------------------- #
+def test_taste_profile_unauthenticated_is_401(client):
+    """`client` already establishes the db override for this test's duration;
+    a bare TestClient(app) instance never got the default user's bearer
+    token attached (same pattern as Phase 8.2's library auth test)."""
+    with TestClient(app) as anon:
+        assert anon.get("/taste-profile").status_code == 401
+
+
+def test_two_users_have_independent_taste_profiles(client):
+    a_id = _add(client, source_id="ISO-A1", genres=["Horror"], language="ja")
+    client.patch(f"/library/{a_id}", json={"status": "completed", "favourite": True})
+
+    other = register_and_login(client, "taste-iso-b@example.com")
+    b_id = _add(client, headers=other, source_id="ISO-B1", genres=["Romance"], language="fr")
+    client.patch(
+        f"/library/{b_id}", json={"status": "completed", "favourite": True}, headers=other
+    )
+
+    profile_a = client.get("/taste-profile").json()
+    profile_b = client.get("/taste-profile", headers=other).json()
+
+    assert "Horror" in profile_a["favourite_genres"]
+    assert "Romance" not in profile_a["favourite_genres"]
+    assert "ja" in profile_a["favourite_languages"]
+
+    assert "Romance" in profile_b["favourite_genres"]
+    assert "Horror" not in profile_b["favourite_genres"]
+    assert "fr" in profile_b["favourite_languages"]
+
+
+def test_user_a_library_changes_do_not_affect_user_b_profile(client):
+    other = register_and_login(client, "taste-iso-c@example.com")
+    b_id = _add(client, headers=other, source_id="ISO-C1", genres=["Comedy"])
+    client.patch(f"/library/{b_id}", json={"status": "completed"}, headers=other)
+    profile_b_before = client.get("/taste-profile", headers=other).json()
+
+    a_id = _add(client, source_id="ISO-C2", genres=["Horror"])
+    client.patch(f"/library/{a_id}", json={"status": "completed", "rating": 9.0})
+
+    profile_b_after = client.get("/taste-profile", headers=other).json()
+    assert profile_b_after == profile_b_before
+
+
+def test_one_taste_profile_row_per_user(client, db_session):
+    """The primary key IS `user_id` (Phase 8.3) — a second row for the same
+    account is structurally impossible, not just conventionally avoided."""
+    from app.models.taste import TasteProfile
+
+    _add(client, source_id="ISO-D1", genres=["Drama"])
+    client.get("/taste-profile")  # a second read must not create a second row
+
+    rows = db_session.query(TasteProfile).all()
+    assert len(rows) == 1

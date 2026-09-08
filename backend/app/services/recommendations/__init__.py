@@ -20,6 +20,16 @@ question is templated (`clarify.py`) — no LLM call.
 
 Sessions are persisted (`recommendation_session`) so the two HTTP turns share
 state; rows are debug data and may be pruned (spec §8.4).
+
+Personalization is user-scoped (Phase 8.3, spec §6.1/§6.3): `start_session`
+and `answer_session` both require `user_id` and thread it into the taste
+profile lookup (`taste_service.get_or_compute`), the Gemini taste-context
+summary (built from that same profile), the completed/dropped exclusion
+(`_excluded_keys`), and the session's own ownership (`RecommendationSession.
+user_id`, checked in `answer_session` the same way `library.get_entry`
+checks `LibraryEntry.user_id`). Nothing about the Gemini-primary vs.
+deterministic-fallback *architecture* changes here — only which account's
+data feeds it.
 """
 from __future__ import annotations
 
@@ -77,11 +87,17 @@ class ClarificationClosed(Exception):
 # --------------------------------------------------------------------------- #
 # Shared helpers
 # --------------------------------------------------------------------------- #
-def _excluded_keys(db: Session) -> set[tuple[str, str]]:
+def _excluded_keys(db: Session, *, user_id: uuid.UUID) -> set[tuple[str, str]]:
+    """Titles the calling user has already completed/dropped (spec §9) — scoped
+    to `user_id` (Phase 8.3): another account's completed/dropped titles must
+    neither be excluded from, nor hidden for, this user's recommendations."""
     rows = db.execute(
         select(MediaItem.source, MediaItem.source_id)
         .join(LibraryEntry, LibraryEntry.media_item_id == MediaItem.id)
-        .where(LibraryEntry.status.in_(_EXCLUDED_STATUSES))
+        .where(
+            LibraryEntry.user_id == user_id,
+            LibraryEntry.status.in_(_EXCLUDED_STATUSES),
+        )
     ).all()
     return {(getattr(s, "value", s), sid) for s, sid in rows}
 
@@ -181,13 +197,15 @@ def _rank_and_finalize(
     extraction: str,
     limit: int,
     taste: TasteProfile,
+    *,
+    user_id: uuid.UUID,
     gemini_suggestions: list[GeminiSuggestion] | None = None,
 ) -> RecommendationResponse:
     session.state = SessionState.ranking
     session.preference_object = prefs.model_dump(mode="json")
     db.flush()
 
-    excluded = _excluded_keys(db)
+    excluded = _excluded_keys(db, user_id=user_id)
     items: list[RecommendationItem] = []
 
     if gemini_suggestions:
@@ -263,6 +281,7 @@ def _rank_and_finalize(
 def start_session(
     db: Session,
     *,
+    user_id: uuid.UUID,
     request_text: str | None = None,
     preferences: PreferenceObject | None = None,
     limit: int = DEFAULT_N,
@@ -271,17 +290,20 @@ def start_session(
     session = RecommendationSession(
         original_request=text or "(structured preferences)",
         state=SessionState.extracting,
+        user_id=user_id,
     )
     db.add(session)
     db.flush()  # assign session.id
 
-    taste = taste_service.get_or_compute(db)
+    taste = taste_service.get_or_compute(db, user_id=user_id)
 
     # A pre-structured preference object is the caller's own answer — skip both
     # the LLM and the clarifying turn (spec §8.3 / Phase 4).
     if preferences is not None:
         session.clarification_used = True
-        return _rank_and_finalize(db, session, preferences, "fallback", limit, taste)
+        return _rank_and_finalize(
+            db, session, preferences, "fallback", limit, taste, user_id=user_id
+        )
 
     prefs, extraction, suggestions = _extract(text, None, taste)
     session.preference_object = prefs.model_dump(mode="json")
@@ -290,7 +312,10 @@ def start_session(
     # the primary path can already answer, regardless of how sparse the
     # extracted structured object looks (spec: Phase 9 hybrid architecture).
     if suggestions or prefs.is_sufficient():
-        return _rank_and_finalize(db, session, prefs, extraction, limit, taste, suggestions)
+        return _rank_and_finalize(
+            db, session, prefs, extraction, limit, taste,
+            user_id=user_id, gemini_suggestions=suggestions,
+        )
 
     # Sparse -> ask exactly one templated question (spec §8.3).
     question = clarifying_question(prefs)
@@ -316,10 +341,17 @@ def answer_session(
     session_id: uuid.UUID,
     answer_text: str | None,
     *,
+    user_id: uuid.UUID,
     limit: int = DEFAULT_N,
 ) -> RecommendationResponse:
     session = db.get(RecommendationSession, session_id)
-    if session is None:
+    # Same choke-point shape as `library.get_entry` (Phase 8.2): a session
+    # that exists but belongs to a different account (or has no owner at
+    # all — a pre-8.3 legacy row, see the model docstring) raises the
+    # identical `SessionNotFound` as one that doesn't exist — never confirms
+    # another account's session exists. Deliberately not relying on the
+    # session UUID being hard to guess as the only protection.
+    if session is None or session.user_id != user_id:
         raise SessionNotFound(str(session_id))
 
     # One-question invariant (spec §8.2): once used, the flow can only go to
@@ -327,7 +359,7 @@ def answer_session(
     if session.clarification_used or session.state not in _ANSWERABLE_STATES:
         raise ClarificationClosed(str(session_id))
 
-    taste = taste_service.get_or_compute(db)
+    taste = taste_service.get_or_compute(db, user_id=user_id)
     existing = PreferenceObject(**(session.preference_object or {}))
     answer = (answer_text or "").strip()
     session.clarification_answer = answer or None
@@ -341,7 +373,10 @@ def answer_session(
         merged, extraction = existing, "fallback"
 
     session.clarification_used = True  # set before ranking; invariant holds even on error
-    return _rank_and_finalize(db, session, merged, extraction, limit, taste, suggestions)
+    return _rank_and_finalize(
+        db, session, merged, extraction, limit, taste,
+        user_id=user_id, gemini_suggestions=suggestions,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -350,10 +385,12 @@ def answer_session(
 def recommend(
     db: Session,
     *,
+    user_id: uuid.UUID,
     request_text: str | None = None,
     preferences: PreferenceObject | None = None,
     limit: int = DEFAULT_N,
 ) -> RecommendationResponse:
     return start_session(
-        db, request_text=request_text, preferences=preferences, limit=limit
+        db, user_id=user_id, request_text=request_text,
+        preferences=preferences, limit=limit,
     )

@@ -2,13 +2,20 @@
 
 `POST /recommendations`            -> ranked list, or one clarifying question
 `POST /recommendations/{id}/answer` -> ranked list (the question is asked at most once)
+
+Requires authentication (Phase 8.3, spec §6.1) — every session is owned by
+the account that started it, and `{id}/answer` 404s for another account's
+session exactly like a nonexistent one; see spec.md §13 for why this
+enforcement's production deployment is held until Phase 8.4.
 """
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.api.deps import get_current_user
 from app.db import get_db
+from app.models.user import User
 from app.schemas.recommendation import (
     ClarificationAnswer,
     RecommendationRequest,
@@ -23,11 +30,14 @@ _SOURCES_DOWN = "Recommendation sources are unavailable right now. Please try ag
 
 @router.post("", response_model=RecommendationResponse)
 def create_recommendations(
-    req: RecommendationRequest, db: Session = Depends(get_db)
+    req: RecommendationRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> RecommendationResponse:
     try:
         return svc.start_session(
-            db, request_text=req.request, preferences=req.preferences
+            db, user_id=current_user.id,
+            request_text=req.request, preferences=req.preferences,
         )
     except svc.RecommendationError as exc:
         raise HTTPException(status_code=503, detail=_SOURCES_DOWN) from exc
@@ -38,9 +48,10 @@ def answer_recommendations(
     session_id: uuid.UUID,
     body: ClarificationAnswer,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> RecommendationResponse:
     try:
-        return svc.answer_session(db, session_id, body.answer)
+        return svc.answer_session(db, session_id, body.answer, user_id=current_user.id)
     except svc.SessionNotFound as exc:
         raise HTTPException(
             status_code=404, detail="Recommendation session not found"

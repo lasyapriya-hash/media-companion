@@ -6,11 +6,14 @@ External data sources and the LLM are stubbed; the deterministic engine
 """
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
 from app.schemas.media import NormalizedMedia, WatchAvailability
 from app.schemas.preference import PreferenceObject
 from app.services.llm.base import GeminiRecommendation, GeminiSuggestion
+from tests.conftest import register_and_login
 
 
 # --------------------------------------------------------------------------- #
@@ -106,9 +109,13 @@ class SpyRecommender:
     def __init__(self, result):
         self.result = result
         self.calls: list[str] = []
+        # Phase 8.3: the taste-context string built for each call, in order —
+        # lets isolation tests assert exactly what personalization Gemini saw.
+        self.taste_contexts: list[str] = []
 
     def recommend(self, request_text, *, taste_context=""):
         self.calls.append(request_text)
+        self.taste_contexts.append(taste_context)
         return self.result
 
 
@@ -421,6 +428,75 @@ def test_completed_library_items_excluded(client, wire):
 
 
 # --------------------------------------------------------------------------- #
+# Phase 8.3: exclusion is per-account, not global (spec §9, §6.1)
+# --------------------------------------------------------------------------- #
+def test_completed_item_only_excluded_for_its_own_owner(client, wire):
+    """User A completed 'Inception'; User B never added it — it must stay
+    eligible for B, and stay excluded for A (the exact example from the
+    Phase 8.3 requirements)."""
+    seen = _media("XSEEN", genres=["Drama"], title="Owner Only")
+    other = register_and_login(client, "exclusion-a@example.com")
+    entry = client.post(
+        "/library", json={"item": seen.model_dump()}, headers=other
+    ).json()
+    client.patch(f"/library/{entry['id']}", json={"status": "completed"}, headers=other)
+
+    wire["clients"] = FakeClients(screen=[seen, _media("FRESH", genres=["Drama"])])
+
+    # The current (default) user has never added this title.
+    resp = client.post("/recommendations", json={"request": "a drama movie"})
+    assert resp.status_code == 200
+    ids = {r["media"]["source_id"] for r in resp.json()["results"]}
+    assert "XSEEN" in ids, "another account's completed title must not be excluded"
+
+    # It stays excluded for the account that actually completed it.
+    resp_b = client.post(
+        "/recommendations", json={"request": "a drama movie"}, headers=other
+    )
+    assert resp_b.status_code == 200
+    ids_b = {r["media"]["source_id"] for r in resp_b.json()["results"]}
+    assert "XSEEN" not in ids_b
+
+
+# --------------------------------------------------------------------------- #
+# Phase 8.3: Gemini's taste-context is built from the caller's own profile
+# --------------------------------------------------------------------------- #
+def test_gemini_taste_context_contains_only_the_calling_users_profile(client, wire):
+    a_entry = client.post(
+        "/library", json={"item": _media("GA1", genres=["Horror"], title="A Fave").model_dump()}
+    ).json()
+    client.patch(
+        f"/library/{a_entry['id']}", json={"status": "completed", "favourite": True}
+    )
+
+    other = register_and_login(client, "gemini-ctx-b@example.com")
+    b_entry = client.post(
+        "/library",
+        json={"item": _media("GB1", genres=["Romance"], title="B Fave").model_dump()},
+        headers=other,
+    ).json()
+    client.patch(
+        f"/library/{b_entry['id']}",
+        json={"status": "completed", "favourite": True},
+        headers=other,
+    )
+
+    spy = SpyRecommender(None)  # force the fallback path; only the context matters here
+    wire["recommender"] = spy
+    wire["clients"] = FakeClients(screen=[_media("N1", genres=["Horror"], title="Neutral")])
+
+    client.post("/recommendations", json={"request": "something to watch"})
+    ctx_a = spy.taste_contexts[-1]
+    assert "Horror" in ctx_a
+    assert "Romance" not in ctx_a
+
+    client.post("/recommendations", json={"request": "something to watch"}, headers=other)
+    ctx_b = spy.taste_contexts[-1]
+    assert "Romance" in ctx_b
+    assert "Horror" not in ctx_b
+
+
+# --------------------------------------------------------------------------- #
 # Reasons: no placeholder text, and request-specific
 # --------------------------------------------------------------------------- #
 def test_reasons_are_clean_and_specific(client, wire):
@@ -456,6 +532,19 @@ def test_all_sources_down_returns_503(client, wire):
 def test_empty_request_is_422(client, wire):
     assert client.post("/recommendations", json={}).status_code == 422
     assert client.post("/recommendations", json={"request": "   "}).status_code == 422
+
+
+# --------------------------------------------------------------------------- #
+# Phase 8.3: POST /recommendations requires authentication
+# --------------------------------------------------------------------------- #
+def test_create_recommendations_unauthenticated_is_401(client, wire):
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    with TestClient(app) as anon:
+        resp = anon.post("/recommendations", json={"request": "a drama movie"})
+        assert resp.status_code == 401
 
 
 # --------------------------------------------------------------------------- #
@@ -693,7 +782,7 @@ def test_zero_signal_scoring_uses_quality_prior_not_novelty():
     from app.services.recommendations.scoring import score_candidate
 
     prefs = PreferenceObject()  # nothing at all
-    taste = TasteProfile(id=1, favourite_genres=[], favourite_languages=[])
+    taste = TasteProfile(user_id=uuid.uuid4(), favourite_genres=[], favourite_languages=[])
     good = _media("good", genres=["Drama"], rating=8.0, popularity=50.0)
     obscure = _media("obscure", genres=["Drama"], rating=5.0, popularity=6.0)
 

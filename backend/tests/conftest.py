@@ -55,11 +55,38 @@ def db_session():
         connection.close()
 
 
+_DEFAULT_USER_EMAIL = "fixture-user@example.com"
+_DEFAULT_USER_PASSWORD = "fixture-password-123"
+
+
+def register_and_login(c: TestClient, email: str, password: str = _DEFAULT_USER_PASSWORD) -> dict[str, str]:
+    """Register (or log in, if already registered) a user via `c` and return
+    an `Authorization` header for that user — for tests that need a SECOND,
+    distinct identity beyond the `client` fixture's auto-authenticated default
+    user (Phase 8.2 cross-user isolation tests)."""
+    resp = c.post("/auth/register", json={"email": email, "password": password})
+    if resp.status_code not in (201, 409):
+        resp.raise_for_status()
+    # /auth/register returns the user, not a token — always log in for that.
+    login_resp = c.post("/auth/login", json={"email": email, "password": password})
+    login_resp.raise_for_status()
+    token = login_resp.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
 @pytest.fixture()
 def client(db_session):
     app.dependency_overrides[get_db] = lambda: db_session
     try:
         with TestClient(app) as c:
+            # Phase 8.2: library endpoints require authentication. Auto-register
+            # + log in a default user and attach the token to every request this
+            # client instance makes, so pre-existing tests (and other test
+            # files' `/library` setup calls) keep working unchanged. httpx's
+            # TestClient merges per-call headers over these, so tests that need
+            # a second identity can override with `register_and_login`.
+            headers = register_and_login(c, _DEFAULT_USER_EMAIL)
+            c.headers.update(headers)
             yield c
     finally:
         app.dependency_overrides.pop(get_db, None)

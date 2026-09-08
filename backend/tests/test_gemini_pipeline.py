@@ -6,6 +6,8 @@ End-to-end API coverage is in test_gemini_recommend.py.
 """
 from __future__ import annotations
 
+import uuid
+
 from app.models.taste import TasteProfile
 from app.schemas.preference import PreferenceObject, ReleaseWindow
 from app.services.llm.base import GeminiSuggestion
@@ -172,12 +174,12 @@ def test_resolve_and_validate_respects_limit(wire):
 # taste_context: background framing, never a hard requirement
 # --------------------------------------------------------------------------- #
 def test_taste_context_empty_when_no_taste_data():
-    taste = TasteProfile(id=1, favourite_genres=[], favourite_languages=[], drop_patterns=[])
+    taste = TasteProfile(user_id=uuid.uuid4(), favourite_genres=[], favourite_languages=[], drop_patterns=[])
     assert gp.taste_context(taste) == ""
 
 
 def test_taste_context_mentions_never_override():
-    taste = TasteProfile(id=1, favourite_genres=["Action"], favourite_languages=["Kannada"])
+    taste = TasteProfile(user_id=uuid.uuid4(), favourite_genres=["Action"], favourite_languages=["Kannada"])
     ctx = gp.taste_context(taste)
     assert "Action" in ctx and "Kannada" in ctx
     assert "never override" in ctx.lower() or "never" in ctx.lower()

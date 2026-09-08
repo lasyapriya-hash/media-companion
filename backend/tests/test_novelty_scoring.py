@@ -16,6 +16,8 @@ branch — untouched by this fix.
 """
 from __future__ import annotations
 
+import uuid
+
 from app.models.taste import TasteProfile
 from app.schemas.media import NormalizedMedia
 from app.schemas.preference import PreferenceObject
@@ -50,7 +52,7 @@ def test_higher_rating_outranks_lower_rating_at_equal_preference_match():
     prefs = PreferenceObject(
         genres=["romance"], language=["telugu"], explicit_fields=["genres", "language"]
     )
-    taste = TasteProfile(id=1, favourite_genres=[], favourite_languages=[])
+    taste = TasteProfile(user_id=uuid.uuid4(), favourite_genres=[], favourite_languages=[])
     good = score_candidate(_movie("GOOD", rating=7.8, popularity=4.1), prefs, taste)
     obscure_low = score_candidate(_movie("LOW", rating=3.0, popularity=3.0), prefs, taste)
     assert good.explanation.any_preference_signal()
@@ -67,7 +69,7 @@ def test_sita_ramam_like_candidate_ranks_at_top_of_saturated_cohort():
         genres=["romance"], mood=["romantic"], language=["telugu"],
         explicit_fields=["genres", "mood", "language"],
     )
-    taste = TasteProfile(id=1, favourite_genres=[], favourite_languages=[])
+    taste = TasteProfile(user_id=uuid.uuid4(), favourite_genres=[], favourite_languages=[])
     cohort = [
         ("Sita Ramam", 7.829, 4.137),
         ("Madhura Wines", 3.0, 3.0066),

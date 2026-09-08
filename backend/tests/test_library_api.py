@@ -1,7 +1,18 @@
-"""Phase 2 verification: search + library CRUD (spec FR1, FR2; acceptance §16)."""
-import pytest
+"""Phase 2 verification: search + library CRUD (spec FR1, FR2; acceptance §16).
 
+Phase 8.2 (spec §6.1): the `client` fixture auto-authenticates as a default
+user (see conftest.py), so every test above this point already exercises the
+authenticated path. The block at the bottom of this file covers what that
+default-user coverage can't: unauthenticated rejection and cross-user
+isolation/duplicate behavior, using a raw unauthenticated client and a second
+distinct user.
+"""
+import pytest
+from fastapi.testclient import TestClient
+
+from app.main import app
 from app.schemas.media import NormalizedMedia
+from tests.conftest import register_and_login
 
 
 def _movie(**over):
@@ -384,3 +395,132 @@ def test_delete_recomputes_taste_profile(client):
 
     client.delete(f"/library/{entry_id}")
     assert client.get("/taste-profile").json()["favourite_genres"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Phase 8.2: authentication + cross-user ownership (spec §6.1)
+# --------------------------------------------------------------------------- #
+def test_library_endpoints_reject_unauthenticated_requests(client):
+    """Every library route 401s with no bearer token — using a bare TestClient
+    that shares the fixture's db override but never got the default user's
+    Authorization header attached."""
+    entry_id = client.post("/library", json={"item": _movie()}).json()["id"]
+
+    with TestClient(app) as anon:
+        assert anon.get("/library").status_code == 401
+        assert (
+            anon.post("/library", json={"item": _movie(source_id="anon-add")}).status_code
+            == 401
+        )
+        assert anon.get(f"/library/{entry_id}").status_code == 401
+        assert (
+            anon.patch(f"/library/{entry_id}", json={"favourite": True}).status_code
+            == 401
+        )
+        assert (
+            anon.put(
+                f"/library/{entry_id}/progress", json={"seasons_completed": 1}
+            ).status_code
+            == 401
+        )
+        assert anon.delete(f"/library/{entry_id}").status_code == 401
+
+
+def test_authenticated_request_succeeds(client):
+    """Sanity check that the fixture's default user is genuinely authenticated
+    (not e.g. accidentally bypassing the dependency)."""
+    resp = client.post("/library", json={"item": _movie()})
+    assert resp.status_code == 201, resp.text
+
+
+def test_user_cannot_get_another_users_entry(client):
+    entry_id = client.post("/library", json={"item": _movie()}).json()["id"]
+    other = register_and_login(client, "isolation-get@example.com")
+    assert client.get(f"/library/{entry_id}", headers=other).status_code == 404
+    # owner is unaffected
+    assert client.get(f"/library/{entry_id}").status_code == 200
+
+
+def test_user_cannot_patch_another_users_entry(client):
+    entry_id = client.post("/library", json={"item": _movie()}).json()["id"]
+    other = register_and_login(client, "isolation-patch@example.com")
+    resp = client.patch(
+        f"/library/{entry_id}", json={"favourite": True}, headers=other
+    )
+    assert resp.status_code == 404
+    # owner's entry was not modified by the other user's attempt
+    assert client.get(f"/library/{entry_id}").json()["favourite"] is False
+
+
+def test_user_cannot_update_progress_on_another_users_entry(client):
+    entry_id = client.post("/library", json={"item": _series()}).json()["id"]
+    client.put(
+        f"/library/{entry_id}/progress",
+        json={"current_season": 2, "current_episode": 3},
+    )
+    other = register_and_login(client, "isolation-progress@example.com")
+    resp = client.put(
+        f"/library/{entry_id}/progress",
+        json={"current_season": 5},
+        headers=other,
+    )
+    assert resp.status_code == 404
+    # owner's progress is untouched by the other user's attempt
+    reread = client.get(f"/library/{entry_id}").json()["progress"]
+    assert reread["current_season"] == 2 and reread["current_episode"] == 3
+
+
+def test_user_cannot_delete_another_users_entry(client):
+    entry_id = client.post("/library", json={"item": _movie()}).json()["id"]
+    other = register_and_login(client, "isolation-delete@example.com")
+    assert client.delete(f"/library/{entry_id}", headers=other).status_code == 404
+    # entry still exists for the owner
+    assert client.get(f"/library/{entry_id}").status_code == 200
+
+
+def test_list_only_shows_the_authenticated_users_own_entries(client):
+    client.post("/library", json={"item": _movie()})
+    other = register_and_login(client, "isolation-list@example.com")
+    assert client.get("/library", headers=other).json() == []
+    assert len(client.get("/library").json()) >= 1
+
+
+def test_duplicate_same_user_same_media_still_409(client):
+    """Regression: existing same-user duplicate behavior is unchanged by
+    per-user scoping."""
+    payload = _book(source_id="dup-same-user")
+    assert client.post("/library", json={"item": payload}).status_code == 201
+    assert client.post("/library", json={"item": payload}).status_code == 409
+
+
+def test_different_users_can_each_add_the_same_media_sharing_one_media_item(client):
+    payload = _movie(source_id="shared-across-users")
+    first = client.post("/library", json={"item": payload})
+    assert first.status_code == 201
+
+    other = register_and_login(client, "isolation-duplicate@example.com")
+    second = client.post("/library", json={"item": payload}, headers=other)
+    assert second.status_code == 201, second.text
+
+    # two distinct library entries...
+    assert second.json()["id"] != first.json()["id"]
+    # ...referencing the exact same underlying media_item, not a duplicate.
+    assert second.json()["media"]["id"] == first.json()["media"]["id"]
+
+    # and each user's list only shows their own entry.
+    assert len(client.get("/library").json()) == 1
+    assert len(client.get("/library", headers=other).json()) == 1
+
+
+def test_removing_own_entry_still_works_after_another_user_shares_the_media(client):
+    """Regression: owner's own DELETE still succeeds normally even once a
+    second user also holds an entry for the same media_item."""
+    payload = _movie(source_id="shared-then-delete")
+    entry_id = client.post("/library", json={"item": payload}).json()["id"]
+    other = register_and_login(client, "isolation-remove@example.com")
+    client.post("/library", json={"item": payload}, headers=other)
+
+    assert client.delete(f"/library/{entry_id}").status_code == 204
+    assert client.get("/library").json() == []
+    # the other user's own entry survives untouched
+    assert len(client.get("/library", headers=other).json()) == 1
