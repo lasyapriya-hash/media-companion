@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
+import AuthGate from "@/components/AuthGate";
 import SiteNav from "@/components/SiteNav";
 
 export const metadata: Metadata = {
@@ -23,7 +24,7 @@ export default function RootLayout({
       <body>
         <div className="wrap">
           <SiteNav />
-          {children}
+          <AuthGate>{children}</AuthGate>
         </div>
       </body>
     </html>
