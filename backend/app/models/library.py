@@ -29,14 +29,14 @@ class LibraryEntry(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    # Phase 8.2a: the owning account. Nullable for now — existing rows
-    # predate this column and have no owner yet. Tightened to NOT NULL in
-    # migration 1c240902dee9, once every row has been claimed by a real
-    # account via `app/scripts/claim_legacy_library.py` (spec §6.1).
-    user_id: Mapped[uuid.UUID | None] = mapped_column(
+    # Phase 8.2: the owning account. NOT NULL — every entry belongs to
+    # exactly one user (spec §6.1). Tightened from nullable by migration
+    # 1c240902dee9, after every pre-existing row was claimed by a real
+    # account via `app/scripts/claim_legacy_library.py`.
+    user_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True),
         sa.ForeignKey("user.id", ondelete="CASCADE"),
-        nullable=True,
+        nullable=False,
     )
     media_item_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True),
