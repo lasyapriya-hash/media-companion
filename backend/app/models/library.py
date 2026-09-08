@@ -14,7 +14,11 @@ from app.models.media import MediaItem
 class LibraryEntry(Base):
     __tablename__ = "library_entry"
     __table_args__ = (
-        sa.UniqueConstraint("media_item_id", name="uq_library_entry_media_item"),
+        # Phase 8.2: per-user uniqueness, not global — the same title can be
+        # in two different users' libraries, but not twice in the same one.
+        sa.UniqueConstraint(
+            "user_id", "media_item_id", name="uq_library_entry_user_media_item"
+        ),
         sa.CheckConstraint(
             "rating IS NULL OR "
             "(rating >= 1.0 AND rating <= 10.0 AND (rating * 2) = floor(rating * 2))",
@@ -24,6 +28,15 @@ class LibraryEntry(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    # Phase 8.2a: the owning account. Nullable for now — existing rows
+    # predate this column and have no owner yet. Tightened to NOT NULL in
+    # migration 1c240902dee9, once every row has been claimed by a real
+    # account via `app/scripts/claim_legacy_library.py` (spec §6.1).
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        sa.ForeignKey("user.id", ondelete="CASCADE"),
+        nullable=True,
     )
     media_item_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True),

@@ -37,6 +37,14 @@ class Settings(BaseSettings):
     # A current free-tier Gemini model. Blank -> service default.
     gemini_model: str = ""
 
+    # --- Auth (Phase 8: authentication foundation) --- #
+    # No default: a blank/predictable signing key would let anyone forge a
+    # token. app/services/auth.py refuses to sign or verify a token when this
+    # is empty, rather than silently using an insecure fallback.
+    jwt_secret_key: str = ""
+    jwt_algorithm: str = "HS256"
+    jwt_expires_minutes: int = 60 * 24 * 7  # 7 days — a personal app, not a bank
+
     @field_validator("database_url")
     @classmethod
     def _normalize_db_url(cls, v: str) -> str:
