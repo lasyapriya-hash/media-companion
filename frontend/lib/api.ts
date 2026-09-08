@@ -1,8 +1,21 @@
 // Central backend client. The frontend never talks to external APIs or holds
 // API keys (spec FR8); it only calls this backend base URL.
 
+import { clearToken, getToken } from "@/lib/auth";
+
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+
+// `/auth/*` calls never need — and must never send — a stored bearer token:
+// they're how a token gets obtained in the first place, and login's own 401
+// (bad credentials) is a normal, expected error, not a session-expiry event
+// that should clear anything or redirect anywhere (spec: preserve existing
+// error behavior for that call; Phase 8.4A).
+const AUTH_PATHS = ["/auth/login", "/auth/register"];
+
+function isAuthPath(path: string): boolean {
+  return AUTH_PATHS.some((p) => path === p || path.startsWith(`${p}?`));
+}
 
 export type MediaType = "movie" | "series" | "book";
 export type LibraryStatus = "want" | "in_progress" | "completed" | "dropped";
@@ -98,16 +111,40 @@ export interface LibraryEntryOut {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  // Never attach a stored token to /auth/* — see AUTH_PATHS above.
+  const token = isAuthPath(path) ? null : getToken();
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+
   let res: Response;
   try {
     res = await fetch(`${API_BASE_URL}${path}`, {
       cache: "no-store",
-      headers: { "Content-Type": "application/json" },
+      headers,
       ...init,
     });
   } catch {
     throw new Error("Could not reach the server.");
   }
+
+  // A protected call's token was rejected or has expired (Phase 8.4A): clear
+  // it and send the user to log in again. /auth/* endpoints are exempt —
+  // their own 401 (e.g. wrong password) is a normal error for the caller to
+  // display, not a session-expiry event, and must never itself redirect
+  // (that would loop: /login's own failed-login response would bounce back
+  // to /login).
+  if (res.status === 401 && !isAuthPath(path)) {
+    clearToken();
+    if (
+      typeof window !== "undefined" &&
+      window.location.pathname !== "/login"
+    ) {
+      window.location.assign("/login");
+    }
+  }
+
   if (!res.ok) {
     let detail = `Request failed (HTTP ${res.status})`;
     try {
@@ -124,6 +161,38 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function getHealth() {
   return request<HealthResponse>("/health");
+}
+
+// --- Authentication (spec §13, Phase 8.1/8.4) --- //
+//
+// Pure API-call wrappers, like every other function in this file — neither
+// stores nor clears the token itself. The caller (the future login/register
+// UI, Phase 8.4B) decides when to call `setToken()` from `@/lib/auth` with
+// the returned `access_token`.
+
+export interface RegisterResponse {
+  id: string;
+  email: string;
+  created_at: string;
+}
+
+export function register(email: string, password: string) {
+  return request<RegisterResponse>("/auth/register", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+  });
+}
+
+export interface LoginResponse {
+  access_token: string;
+  token_type: string;
+}
+
+export function login(email: string, password: string) {
+  return request<LoginResponse>("/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+  });
 }
 
 export function searchMedia(query: string, type?: MediaType) {
