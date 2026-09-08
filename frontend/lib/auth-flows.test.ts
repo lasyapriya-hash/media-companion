@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { passwordsMatch, submitLogin, submitRegister } from "./auth-flows";
-import { getToken } from "./auth";
+import { passwordsMatch, performLogout, submitLogin, submitRegister } from "./auth-flows";
+import { getToken, setToken } from "./auth";
 
 /** A minimal in-memory `Storage` — enough for `localStorage`'s surface. */
 function makeMemoryStorage(): Storage {
@@ -114,6 +114,43 @@ describe("submitRegister", () => {
     expect(passwordsMatch("hunter2222", "different")).toBe(false);
     // fetch was never wired to a response — calling it now would throw, so
     // this doubles as proof nothing here ever invoked the network.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("performLogout", () => {
+  it("clears the stored token", () => {
+    setToken("some-token");
+
+    performLogout(vi.fn());
+
+    expect(getToken()).toBeNull();
+  });
+
+  it("navigates to /login", () => {
+    setToken("some-token");
+    const navigate = vi.fn();
+
+    performLogout(navigate);
+
+    expect(navigate).toHaveBeenCalledWith("/login");
+    expect(navigate).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears the token and navigates even when there was no token to begin with", () => {
+    const navigate = vi.fn();
+
+    expect(() => performLogout(navigate)).not.toThrow();
+
+    expect(getToken()).toBeNull();
+    expect(navigate).toHaveBeenCalledWith("/login");
+  });
+
+  it("makes no network call — logout is purely client-side (stateless JWTs)", () => {
+    setToken("some-token");
+
+    performLogout(vi.fn());
+
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

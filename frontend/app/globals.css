@@ -99,7 +99,8 @@ p {
   gap: 1.6rem;
   flex-wrap: wrap;
 }
-.masthead__nav a {
+.masthead__nav a,
+.masthead__nav button {
   font-size: 0.72rem;
   letter-spacing: 0.16em;
   text-transform: uppercase;
@@ -108,7 +109,23 @@ p {
   border-bottom: 1px solid transparent;
   transition: color 0.15s ease, border-color 0.15s ease;
 }
-.masthead__nav a:hover {
+/* Reset the global pill-button look (app/globals.css `button {}`) so
+   Log Out reads as a plain nav item, matching Collection/Discover/etc. */
+.masthead__nav button {
+  font-family: inherit;
+  font-weight: inherit;
+  background: transparent;
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
+  border-radius: 0;
+  padding-left: 0;
+  padding-right: 0;
+  padding-top: 0;
+  cursor: pointer;
+}
+.masthead__nav a:hover,
+.masthead__nav button:hover {
   color: var(--ink);
 }
 .masthead__nav a.is-active {

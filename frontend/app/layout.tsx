@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import AuthGate from "@/components/AuthGate";
 import SiteNav from "@/components/SiteNav";
+import { AuthProvider } from "@/lib/auth-context";
 
 export const metadata: Metadata = {
   title: "Media Companion",
@@ -23,8 +24,10 @@ export default function RootLayout({
     <html lang="en">
       <body>
         <div className="wrap">
-          <SiteNav />
-          <AuthGate>{children}</AuthGate>
+          <AuthProvider>
+            <SiteNav />
+            <AuthGate>{children}</AuthGate>
+          </AuthProvider>
         </div>
       </body>
     </html>

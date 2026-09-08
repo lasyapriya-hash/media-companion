@@ -44,3 +44,20 @@ export function evaluateGuard(
     shouldRedirect: !tokenPresent && !isPublicPath(pathname),
   };
 }
+
+/**
+ * The shared three-way state both `AuthGate` (route guarding) and
+ * `SiteNav` (Login/Register vs. Logout) render from — one function so the
+ * two components can never disagree about what "checking"/"authenticated"/
+ * "unauthenticated" means (Phase 8.4D). `checked` is false only during the
+ * brief window before the first client-side token check has run (see
+ * `lib/auth-context.tsx`); everything after that is a plain reflection of
+ * whether a token is currently stored.
+ */
+export function deriveAuthState(
+  checked: boolean,
+  isAuthenticated: boolean,
+): AuthState {
+  if (!checked) return "checking";
+  return isAuthenticated ? "authenticated" : "unauthenticated";
+}

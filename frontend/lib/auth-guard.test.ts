@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { evaluateGuard, isPublicPath } from "./auth-guard";
+import { deriveAuthState, evaluateGuard, isPublicPath } from "./auth-guard";
 
 // Deliberately no `vi.stubGlobal("window", ...)` anywhere in this file —
 // this is a plain-Node vitest environment with no `window`/`localStorage`
@@ -59,5 +59,21 @@ describe("evaluateGuard", () => {
     const first = evaluateGuard("/", false);
     const second = evaluateGuard("/", false);
     expect(first).toEqual(second);
+  });
+});
+
+// Phase 8.4D: the shared decision both AuthGate and SiteNav render from.
+describe("deriveAuthState", () => {
+  it("is 'checking' before the first client-side check has run, regardless of token", () => {
+    expect(deriveAuthState(false, false)).toBe("checking");
+    expect(deriveAuthState(false, true)).toBe("checking");
+  });
+
+  it("is the logged-out navigation state once checked and no token is present", () => {
+    expect(deriveAuthState(true, false)).toBe("unauthenticated");
+  });
+
+  it("is the logged-in navigation state once checked and a token is present", () => {
+    expect(deriveAuthState(true, true)).toBe("authenticated");
   });
 });

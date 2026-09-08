@@ -3,10 +3,12 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { useAuth } from "@/lib/auth-context";
 import { submitLogin } from "@/lib/auth-flows";
 
 export default function LoginPage() {
   const router = useRouter();
+  const { refresh } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -20,6 +22,10 @@ export default function LoginPage() {
 
     const result = await submitLogin(email.trim(), password);
     if (result.ok) {
+      // Update the shared auth state before navigating, so SiteNav/AuthGate
+      // already show the authenticated view by the time / renders — a
+      // plain localStorage write doesn't notify anything on its own.
+      refresh();
       router.push("/");
       return; // stay disabled through the navigation, not a fresh idle state
     }

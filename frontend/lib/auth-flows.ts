@@ -6,7 +6,7 @@
 // navigates itself, since a plain module has no router to navigate with.
 
 import { login, register } from "@/lib/api";
-import { setToken } from "@/lib/auth";
+import { clearToken, setToken } from "@/lib/auth";
 
 export type AuthFlowResult = { ok: true } | { ok: false; error: string };
 
@@ -48,4 +48,19 @@ export async function submitRegister(
   } catch (err) {
     return { ok: false, error: messageFor(err) };
   }
+}
+
+/**
+ * Log out (Phase 8.4D): clear the stored token and send the browser to
+ * /login. No backend call — JWTs are stateless in this design, so there is
+ * no server-side session to invalidate (spec: auth foundation, Phase 8.1).
+ *
+ * Takes `navigate` as a parameter rather than importing `next/navigation`
+ * itself, for the same reason `submitLogin`/`submitRegister` don't
+ * navigate: this is a plain module with no router of its own. The caller
+ * (`lib/auth-context.tsx`) passes its `router.push`.
+ */
+export function performLogout(navigate: (path: string) => void): void {
+  clearToken();
+  navigate("/login");
 }
