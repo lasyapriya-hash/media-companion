@@ -17,6 +17,11 @@ directly — `series_progress` inherits ownership automatically through its
 If `--email` is omitted, it looks for exactly one existing `user` row and
 uses that (the common personal-project case); with zero or more than one,
 it refuses and asks for an explicit `--email` rather than guessing.
+
+The actual claiming logic lives in `app.services.legacy_claim` — shared
+with `app/api/admin.py`'s temporary HTTP endpoint for Render plans that
+have neither Shell nor one-off Job access, so both entry points guarantee
+the exact same behavior.
 """
 from __future__ import annotations
 
@@ -26,8 +31,8 @@ import sys
 from sqlalchemy import select
 
 from app.db import SessionLocal
-from app.models.library import LibraryEntry
 from app.models.user import User
+from app.services.legacy_claim import claim_orphaned_entries
 
 
 def _resolve_user(db, email: str | None) -> User | None:
@@ -52,27 +57,19 @@ def claim(email: str | None = None, dry_run: bool = False) -> int:
         if user is None:
             return 0
 
-        # LibraryEntry.media is lazy="joined", so `entry.media.title` below
-        # doesn't trigger extra per-row queries.
-        orphaned = list(
-            db.scalars(select(LibraryEntry).where(LibraryEntry.user_id.is_(None)))
-        )
-        if not orphaned:
+        result = claim_orphaned_entries(db, user_id=user.id, dry_run=dry_run)
+
+        if not result.entries:
             print(f"Nothing to claim — no unowned library_entry rows found "
                   f"(target account: {user.email}).")
             return 0
 
-        for entry in orphaned:
-            print(f"{entry.media.title!r:50} ({entry.media.type.value}) -> {user.email}")
-            if not dry_run:
-                entry.user_id = user.id
+        for entry in result.entries:
+            print(f"{entry.title!r:50} ({entry.media_type}) -> {user.email}")
 
-        if not dry_run:
-            db.commit()
-
-        print(f"{'Would claim' if dry_run else 'Claimed'} {len(orphaned)} "
+        print(f"{'Would claim' if dry_run else 'Claimed'} {result.count} "
               f"row(s) for {user.email}.")
-        return len(orphaned)
+        return result.count
 
 
 def main() -> None:
