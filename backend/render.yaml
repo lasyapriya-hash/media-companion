@@ -32,6 +32,14 @@ services:
         sync: false
       - key: GEMINI_MODEL
         sync: false
+      # Auth (Phase 8: authentication foundation). Required for
+      # /auth/login and /auth/register to work.
+      - key: JWT_SECRET_KEY
+        sync: false
+      - key: JWT_ALGORITHM
+        sync: false
+      - key: JWT_EXPIRES_MINUTES
+        sync: false
 
 databases:
   - name: media-companion-db
