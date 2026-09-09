@@ -13,10 +13,6 @@ os.environ["DATABASE_URL"] = os.environ.get(
 # fallback and mood-tag classification is skipped, unless a test opts in.
 os.environ["LLM_PROVIDER"] = "none"
 os.environ["GEMINI_API_KEY"] = ""
-# Fixed test-only value for the temporary admin claim endpoint (Phase 8.2
-# bootstrap, app/api/admin.py) — not a secret, just a fake email so tests
-# can exercise the allow-listed vs. non-allow-listed paths deterministically.
-os.environ["LEGACY_CLAIM_ALLOWED_EMAIL"] = "legacy-owner@example.com"
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

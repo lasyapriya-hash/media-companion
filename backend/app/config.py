@@ -45,13 +45,6 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expires_minutes: int = 60 * 24 * 7  # 7 days — a personal app, not a bank
 
-    # --- Legacy library claim (Phase 8.2 bootstrap, temporary) --- #
-    # The only account allowed to call POST /admin/claim-legacy-library
-    # (app/api/admin.py). Blank disables the endpoint for everyone, since no
-    # real email can ever equal "" — fails closed by default. Remove this
-    # setting and app/api/admin.py together once the legacy rows are claimed.
-    legacy_claim_allowed_email: str = ""
-
     @field_validator("database_url")
     @classmethod
     def _normalize_db_url(cls, v: str) -> str:

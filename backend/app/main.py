@@ -10,7 +10,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
-from app.api import admin as admin_api
 from app.api import auth as auth_api
 from app.api import library as library_api
 from app.api import media as media_api
@@ -40,7 +39,6 @@ app.include_router(taste_api.router)
 app.include_router(recommendations_api.router)
 app.include_router(media_api.router)
 app.include_router(auth_api.router)
-app.include_router(admin_api.router)
 
 
 @app.get("/health")
