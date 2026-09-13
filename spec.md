@@ -2,19 +2,22 @@
 
 | | |
 |---|---|
-| **Version** | 1.4 (supersedes v1.3 — updates §2, §6.1, §6.3, §9.0, §13, §17 for Phase 8.3: `taste_profile` is now per-account (old singleton discarded, not migrated) and `recommendation_session` is user-owned for new sessions (legacy rows stay permanently NULL-owned); auth is code-complete on taste/recommendation endpoints too, deployment still held for Phase 8.4; see plan.md for the development history) |
-| **Date** | 2026-09-08 |
+| **Version** | 2.0 — establishes Media Companion as a **multi-user** product: every account has its own library, ratings/reviews/favourites, series progress, derived taste profile, and recommendation sessions, all private to that account; media metadata stays shared/global across accounts (§2, §6, §11, §13). Supersedes v1.x, which specified a single-user product with authentication treated as an add-on. See plan.md for implementation/rollout history. |
+| **Date** | 2026-09-10 |
 | **Owner** | lasyapriya@iisc.ac.in |
-| **Status** | Living document — describes the current implementation, not a changelog |
+| **Status** | Living document — describes the intended product and architecture, not implementation status or a changelog |
 
 ---
 
 ## 1. Overview
 
-Build a **single-user** personal media companion that unifies **movies, TV
-series, and books** in one library and lets the user describe what they feel
-like watching or reading in **natural language** — mood, situation, and
-constraints — instead of selecting filters.
+Build a **multi-user** personal media companion that unifies **movies, TV
+series, and books** in one library per account and lets each user describe
+what they feel like watching or reading in **natural language** — mood,
+situation, and constraints — instead of selecting filters. Every account's
+library, ratings, taste profile, and recommendations are private to that
+account; the underlying media catalog is shared, global reference data
+reused across all accounts (§2, §6).
 
 The system:
 
@@ -30,27 +33,31 @@ Recommendations are explicitly **not** a "highest-rated first" list.
 
 ## 2. Target User & Problem
 
-Originally a single user — the project owner, with no accounts and no login.
-An authentication foundation (registration, login, JWT — Phase 8.1, see §13
-and plan.md) now exists, and as of Phase 8.2 the **library is genuinely
-user-owned in the data model and API code**: every library item, its
-status/rating/review/favourite, and its series progress belong to exactly
-one account, and one account can never see or modify another's entries
-(§6.1). As of Phase 8.3, the derived **taste profile and every recommendation
-session are also account-scoped in the data model and API code**: each
-account has its own taste profile (rebuilt only from that account's library),
-and its own recommendation sessions — including which titles get excluded as
-already completed/dropped, and what personalization context Gemini receives
-(§6.1, §6.3, §9.0). The API layer already enforces all of this (every
-library, taste-profile, and recommendation endpoint requires a valid bearer
-token), but that enforcement's rollout to the live production deployment is
-deliberately sequenced with Phase 8.4 (§6.1, §13) so the current frontend —
-which cannot yet send a token — is never left unable to reach any of these
-endpoints.
+Media Companion is a **multi-user** application. Anyone can register their
+own account and gets, from that point on, an independent and private
+library, independent ratings/reviews/favourites/progress, an independently
+computed taste profile, and independent recommendation sessions (§6). One
+account's data — what it has added, rated, reviewed, marked as favourite, or
+asked for recommendations about — is never visible to, or affected by, any
+other account (§6.1, §11, §13).
 
-The user currently splits movie/series tracking and book tracking across
-separate apps, and wants recommendations driven by *"what do I feel like right
-now"* rather than static filters or top-rated lists.
+The underlying media catalog — titles, genres, synopses, provider ratings,
+availability (`media_item`, §6.1) — is **shared, global reference data**: it
+is fetched once from the external providers (TMDb, Open Library / Google
+Books), cached, and reused across every account, never duplicated per user.
+Two different accounts can each hold the same title in their own library,
+with completely independent status, rating, review, favourite, and progress,
+both referencing the same shared metadata record.
+
+*Historical note:* the project began as a personal, single-user tool for its
+original owner, with no account system at all. It has since been
+generalized into a multi-user product; the single-user framing no longer
+describes the intended system (plan.md has that development history).
+
+The problem being solved, for any given account: media tracking today is
+split across separate apps for movies/series and books, and recommendations
+tend to be static filters or "highest rated" lists rather than driven by
+*"what do I feel like right now."*
 
 ---
 
@@ -87,7 +94,10 @@ multi-turn conversation flow (Section 8). Deepen in a later cycle.
 
 ### 5.1 Unified Media Library
 
-- Add any searched item (movie, series, or book) to the library.
+- Add any searched item (movie, series, or book) to **the authenticated
+  account's own library**. Every action below (status, favourite, rating,
+  review, progress) applies to that account's own copy of the item only —
+  never to any other account's (§6.1, §11).
 - **Status:** `want` · `in_progress` · `completed` · `dropped`.
 - **Favourite** flag.
 - **Personal rating:** 1–10, half-steps allowed (1.0, 1.5, … 10.0). Optional.
@@ -134,6 +144,11 @@ multi-turn conversation flow (Section 8). Deepen in a later cycle.
 
 ### 5.3 Conversational Natural-Language Recommendations (multi-turn)
 
+- Every recommendation request is made by an authenticated account and
+  evaluated entirely in that account's own context: the exclusion of
+  already-completed/dropped titles (§9) and the personalization context
+  handed to Gemini (§6.3, §9.0) both come from that account's own library
+  and taste profile only, never another account's.
 - User describes mood / situation / constraints in free text.
 - **Gemini is the primary recommendation intelligence**, not just an
   extractor. One bounded call both (a) extracts a **structured preference
@@ -177,20 +192,26 @@ multi-turn conversation flow (Section 8). Deepen in a later cycle.
 
 ## 6. Data Model
 
-Persistence is **Postgres**. As of Phase 8.2, `library_entry` carries a
-`user_id` (Section 6.1): each real-world item can have one library entry
-**per account**, not one globally — the same title can sit in two different
-users' libraries simultaneously, each with independent status, rating,
-review, and progress. `media_item` (the cached provider metadata) remains
-shared/global by design: it is never duplicated per user, only referenced by
-however many users' `library_entry` rows point at it. As of Phase 8.3,
-`taste_profile` carries `user_id` as its primary key (one row per account,
-enforced structurally) and `recommendation_session` carries a `user_id`
-column (nullable — see its entity section below for why).
+Persistence is **Postgres**. Ownership is structured around the account
+(`user`, §6.1): a `library_entry` — and everything that hangs off it
+(`series_progress`) — belongs to exactly one account; `taste_profile` and
+`recommendation_session` likewise each belong to exactly one account.
+`media_item` (the cached provider metadata) is the one deliberate exception:
+it is shared/global, never owned by any account, and is referenced by
+however many different accounts' `library_entry` rows point at it — never
+duplicated per user.
+
+```
+user ─┬─▶ library_entry ─▶ series_progress
+      ├─▶ taste_profile
+      └─▶ recommendation_session
+
+media_item ◀── library_entry   (shared/global; many accounts may reference the same row)
+```
 
 ### 6.1 Entities
 
-#### `user` — an account (Phase 8.1)
+#### `user` — an account
 
 | Field | Type | Notes |
 |---|---|---|
@@ -199,13 +220,13 @@ column (nullable — see its entity section below for why).
 | `hashed_password` | text | bcrypt |
 | `created_at` | timestamptz | |
 
-**Constraints:** `unique (email)`. `library_entry.user_id` references this
-table as of Phase 8.2 (`ON DELETE CASCADE` — deleting a user deletes their
-library entries and, transitively, their series progress). As of Phase 8.3,
-`taste_profile.user_id` and `recommendation_session.user_id` also reference
-it (both `ON DELETE CASCADE`).
+**Constraints:** `unique (email)`. Every `library_entry`, `taste_profile`,
+and `recommendation_session` row references exactly one `user` row
+(`ON DELETE CASCADE` — deleting an account deletes all of that account's
+data: its library entries, series progress, taste profile, and
+recommendation sessions).
 
-#### `media_item` — cached external metadata
+#### `media_item` — cached external metadata (shared/global, never user-owned)
 
 | Field | Type | Notes |
 |---|---|---|
@@ -233,12 +254,12 @@ it (both `ON DELETE CASCADE`).
 
 **Constraints:** `unique (source, source_id)`.
 
-#### `library_entry` — one account's relationship to an item (Phase 8.2: user-owned)
+#### `library_entry` — one account's relationship to an item (user-owned)
 
 | Field | Type | Notes |
 |---|---|---|
 | `id` | uuid, PK | |
-| `user_id` | uuid, FK → `user.id`, not null | the owning account (Phase 8.2); `ON DELETE CASCADE` |
+| `user_id` | uuid, FK → `user.id`, not null | the owning account; every entry belongs to exactly one account; `ON DELETE CASCADE` |
 | `media_item_id` | uuid, FK → `media_item.id` | |
 | `status` | enum `want` \| `in_progress` \| `completed` \| `dropped` | required |
 | `favourite` | bool, default false | |
@@ -250,32 +271,15 @@ it (both `ON DELETE CASCADE`).
 **Constraints:** `unique (user_id, media_item_id)` — a title can appear at
 most once in a given account's library, but the same title can independently
 appear in any number of *other* accounts' libraries, each referencing the
-same shared `media_item` row (never a duplicate). This replaced the old
-global `unique (media_item_id)` constraint via a deliberately two-step
-Phase 8.2 migration: `47cf8fa2576e` adds `user_id` **nullable** and swaps the
-constraint immediately (safe even while every row is still unowned — a
-NULL never collides with another NULL under Postgres unique-constraint
-semantics), then a separate, later migration (`1c240902dee9`) tightens
-`user_id` to NOT NULL. Nothing backfills automatically and no placeholder
-account is ever created — pre-existing rows are assigned to a real
-registered account by running `python -m app.scripts.claim_legacy_library`
-once, between those two migrations (see plan.md Phase 8.2 for the exact
-sequence and why). The NOT-NULL migration deliberately fails the deploy if
-any row is still unclaimed when it runs, rather than silently inventing an
-owner for it.
+same shared `media_item` row (never a duplicate).
 >
-> **Ownership enforcement (Phase 8.2, code complete — deployment held for
-> Phase 8.4):** every `/library*` endpoint requires a valid bearer token
-> (`get_current_user`, Section 13) and every service operation — list, get,
-> update, update-progress, remove — is scoped to `current_user.id` through a
-> single ownership check. Requesting or mutating another account's entry
-> returns the same 404 as a nonexistent id; the API never confirms that
-> another account's entry exists. This is implemented and tested, but its
-> *deployment* to production is intentionally held until it can ship
-> alongside Phase 8.4's frontend token support — the live frontend cannot
-> yet attach an `Authorization` header, so deploying this enforcement any
-> earlier would 401 every request the current production frontend makes.
-> As of Phase 8.3, `taste_profile` and `recommendation_session` are scoped
+> **Ownership enforcement:** every `/library*` endpoint requires a valid,
+> authenticated account (§13) and every service operation — list, get,
+> update, update-progress, remove — is scoped to the calling account through
+> a single ownership check. Requesting or mutating another account's entry
+> returns the same "not found" response as a nonexistent id; the API never
+> confirms that another account's entry exists, so ownership can't be probed
+> by ID-guessing. `taste_profile` and `recommendation_session` are scoped
 > the same way — see their entity sections below and §13.
 
 #### `series_progress` — series only
@@ -290,9 +294,9 @@ owner for it.
 
 Rows exist only for entries whose `media_item.type = 'series'`. No `user_id`
 of its own — ownership is inherited automatically through its 1:1
-`library_entry_id` FK (`ON DELETE CASCADE`), so Phase 8.2's ownership checks
-on `library_entry` already cover it (ability to read/write a series' progress
-requires owning its `library_entry`, same as any other field on it).
+`library_entry_id` FK (`ON DELETE CASCADE`), so `library_entry`'s ownership
+checks already cover it (ability to read/write a series' progress requires
+owning its `library_entry`, same as any other field on it).
 
 #### `recommendation_session` — optional, non-durable
 
@@ -303,7 +307,7 @@ rows are **not** surfaced as user-visible history and MAY be pruned freely.
 | Field | Type | Notes |
 |---|---|---|
 | `id` | uuid, PK | session id returned to the client |
-| `user_id` | uuid, FK → `user.id`, **nullable** | the owning account (Phase 8.3); see below for why this stays nullable |
+| `user_id` | uuid, FK → `user.id`, not null | the owning account; every session is created by, and belongs to, exactly one authenticated account |
 | `original_request` | text | |
 | `preference_object` | jsonb | latest extracted preferences (Section 7) |
 | `clarification_question` | text, null | the single question, if one was asked |
@@ -313,20 +317,17 @@ rows are **not** surfaced as user-visible history and MAY be pruned freely.
 | `state` | enum (Section 8.1) | |
 | `created_at` | timestamptz | |
 
-**Ownership (Phase 8.3):** `POST /recommendations` always sets `user_id` to
-the caller; `POST /recommendations/{id}/answer` checks it the same way
-`library.get_entry` checks `LibraryEntry.user_id` (Phase 8.2) — a session
-that exists but belongs to a different account returns the identical 404 as
-one that doesn't exist, and the session UUID's own unguessability is
-deliberately *not* relied on as the only protection.
+**Ownership:** `POST /recommendations` sets `user_id` to the caller; every
+later operation on a session (e.g. `POST /recommendations/{id}/answer`)
+checks it the same way `library_entry` ownership is checked — a session that
+exists but belongs to a different account is indistinguishable from one that
+doesn't exist, and the session UUID's own unguessability is deliberately
+*not* relied on as the only protection.
 
-`user_id` is **nullable by design, permanently** — not a transitional state
-like `library_entry`'s Phase 8.2 migration pair. This table is explicitly
-debug/prunable data (this section, and §8.4): sessions created before Phase
-8.3 have no owner and are left that way forever rather than backfilled via a
-claim step. A `NULL`-owned row can never match any authenticated caller's
-`user_id`, so it simply becomes permanently unreachable through the API —
-the intended outcome for orphaned legacy rows, not a gap.
+Being owned data does not make this table user-visible history: it is
+explicitly debug/prunable data (this section, and §8.4) and rows MAY be
+pruned freely regardless of age. Ownership just determines *who*, while a
+row exists, is allowed to read or answer it.
 
 ### 6.2 Enumerations
 
@@ -341,22 +342,14 @@ the intended outcome for orphaned legacy rows, not a gap.
 ### 6.3 Taste Profile (derived, not a trained model)
 
 Recomputed on every rating change and every status change, scoped to the
-account that made the change. **One row per account (Phase 8.3)** —
+account that made the change. **One row per account** —
 `taste_profile.user_id` (FK → `user.id`, `ON DELETE CASCADE`) is the primary
 key itself, so "one profile per account" is a structural guarantee, not a
 convention: a second row for the same account is a primary-key violation.
 `taste_profile.recompute()`/`get_or_compute()` both require `user_id` and
 only ever read that account's own `library_entry` rows — one account's
-library changes never affect another's profile.
-
-Migration note: the pre-8.3 implementation was a genuine singleton (one row
-for the whole application, computed from every `library_entry` regardless of
-account). That row was **discarded, not migrated**, when Phase 8.3 shipped —
-it is fully derived/cache data with no real owner to assign it to (it was
-computed from every account's combined library, not any one account's), so
-each account's profile is instead rebuilt fresh, correctly, the next time
-`get_or_compute()` runs for them. This did not touch `library_entry` or
-`series_progress` in any way.
+library changes never affect another's profile, and a profile is never
+computed from more than one account's data combined.
 
 | Signal | Definition |
 |---|---|
@@ -369,11 +362,11 @@ each account's profile is instead rebuilt fresh, correctly, the next time
 | `computed_at` | timestamptz |
 
 Used as a scoring input for **movie/series** recommendations (the
-deterministic fallback, Section 9.1) and, as of Phase 8.3, as the
-personalization context summarized into the **Gemini-primary path's** prompt
-(`taste_context`, Section 9.0) — always built from the calling account's own
-profile only, never another account's. For **books** in v0 it is used only
-as a light tiebreaker, if at all.
+deterministic fallback, Section 9.1) and as the personalization context
+summarized into the **Gemini-primary path's** prompt (`taste_context`,
+Section 9.0) — always built from the calling account's own profile only,
+never another account's. For **books** in v0 it is used only as a light
+tiebreaker, if at all.
 
 ### 6.4 Derived tags & bucket mappings
 
@@ -524,7 +517,9 @@ and go to `ranking` **unconditionally** — even if still sparse.
 ### 8.4 Session lifetime
 
 - A session is created when a recommendation request is submitted and is
-  addressable by `session.id` for the duration of that interaction.
+  addressable by `session.id` for the duration of that interaction. It
+  belongs to the authenticated account that created it (§6.1); no other
+  account can read or answer it.
 - Nothing about the conversation needs to persist once results are delivered.
   Any persisted `recommendation_session` row is debug data and may be pruned.
 - There is no "resume previous recommendation chat" feature in v0.
@@ -558,8 +553,8 @@ Alongside the request text, the call includes a short **taste-context**
 summary (favourite genres/languages, drop patterns — Section 6.3) generated
 from the calling account's own taste profile, explicitly framed as
 background only — it never overrides or substitutes for anything the request
-states outright. As of Phase 8.3 this is the calling account's own profile,
-never another account's (Section 6.3).
+states outright. This is always the calling account's own profile, never
+another account's (Section 6.3).
 
 #### 9.0.1 Title resolution (hallucination guard)
 
@@ -584,8 +579,8 @@ Gemini's semantic judgment is authoritative for *fit*, never for these facts:
 - an explicit **rating** bound (Section 7) is met by the resolved item's real
   `external_rating`;
 - an explicit **release period** is met by the resolved item's real year;
-- the resolved item is not already excluded by collection status
-  (`completed`/`dropped`);
+- the resolved item is not already excluded by the calling account's own
+  collection status (`completed`/`dropped`);
 - the resolved item clears the same minimum-quality floor as the fallback
   path (Section 9.3).
 
@@ -704,21 +699,33 @@ LLM access, even though Gemini is now the primary path when available.
 
 ## 11. Functional Requirements
 
-- **FR1** — User can search and add any movie/series/book to their library.
-- **FR2** — User can set/change status, rating, review, and (series only)
-  season/episode progress on any library item.
-- **FR3** — User can submit a free-text recommendation request.
-- **FR4** — System extracts a structured preference object from that request.
-- **FR5** — System asks at most one clarifying question when preferences are
+- **FR1** — A person can register an account and authenticate (log in) to use
+  the product; every requirement below operates in the context of that
+  authenticated account.
+- **FR2** — An authenticated user can search and add any movie/series/book to
+  their own library.
+- **FR3** — An authenticated user can set/change status, rating, review,
+  favourite, and (series only) season/episode progress on any item in their
+  own library.
+- **FR4** — An authenticated user can submit a free-text recommendation
+  request.
+- **FR5** — System extracts a structured preference object from that request.
+- **FR6** — System asks at most one clarifying question when preferences are
   sparse (rule 8.3), then always produces a recommendation list.
-- **FR6** — Each recommendation includes a one-sentence, request-specific
+- **FR7** — Each recommendation includes a one-sentence, request-specific
   reason.
-- **FR7** — System shows availability info, or a clean "unknown" state, for
+- **FR8** — System shows availability info, or a clean "unknown" state, for
   each recommended and viewed item.
-- **FR8** — All external API keys are stored and used server-side only, never
+- **FR9** — All external API keys are stored and used server-side only, never
   exposed to the frontend/browser.
-- **FR9** — The taste profile is recomputed on every rating change and every
-  status change.
+- **FR10** — Each user's taste profile is recomputed on every rating change
+  and every status change to that user's own library, and is derived only
+  from that user's own data.
+- **FR11** — One user's library, ratings, reviews, series progress, taste
+  profile, and recommendation sessions are never visible to, retrievable by,
+  or modifiable by another user — including by directly addressing another
+  account's resource IDs while authenticated as a different account, which
+  must behave identically to that resource not existing (§6.1).
 
 ---
 
@@ -744,7 +751,7 @@ LLM access, even though Gemini is now the primary path when available.
 | Frontend | React / Next.js |
 | Database | Postgres — persistence must survive redeploys; no local or in-memory-only storage |
 | LLM | Provider-agnostic interface; Google Gemini (`gemini-3.5-flash-lite`) is the **primary** recommendation intelligence (Section 5.3, 9.0), not just extraction. The optional `mood_tags` call (Section 6.4) is a separate, second bounded call type. Optional — a fully deterministic fallback keeps the engine working with no LLM access; no Anthropic / personal-subscription dependency |
-| Auth | `User` model (UUID id, unique normalized email, bcrypt-hashed password), `POST /auth/register`, `POST /auth/login` (issues an HS256 JWT, default 7-day expiry), and a `get_current_user` dependency that verifies a bearer token and loads the user (Phase 8.1). **Phase 8.2** code requires it on every `/library*` endpoint, and **Phase 8.3** code requires it on `GET /taste-profile` and both `/recommendations*` endpoints too — an unauthenticated request gets 401, and an authenticated request only ever sees/modifies its own library entries, taste profile, and recommendation sessions (Section 6.1) — but that enforcement's *deployment* is deliberately held until Phase 8.4 ships the frontend's token support in the same release, so the live app is never left unable to call any of these endpoints. Search and media-details stay unauthenticated and unscoped — they're stateless, provider-facing lookups with no per-account data. |
+| Auth | Account registration and login by email + password; the password is bcrypt-hashed server-side and never stored or returned in plaintext (`User` model: UUID id, unique normalized email, hashed password). A successful login issues a bearer token (JWT, HS256, default 7-day expiry) that authenticates every subsequent request. A single dependency verifies the token and loads the calling account on every protected route; a missing, malformed, expired, or otherwise invalid token is rejected (401) before any handler body runs. Every library, taste-profile, and recommendation endpoint requires this and is scoped to the calling account (Section 6.1, Section 11) — one account can never see or modify another's resources through the API. Search and media-details endpoints remain public and unauthenticated — they're stateless, provider-facing lookups with no per-account data. |
 | Deployment | backend + Postgres on Render; frontend on Vercel (Section 15 D2 resolved to split) |
 
 ---
@@ -753,10 +760,11 @@ LLM access, even though Gemini is now the primary path when available.
 
 - A working **public URL**; no local-only functionality.
 - Environment variables for **all** API keys (TMDb, book API, the LLM
-  provider — `GEMINI_API_KEY` — and, since Phase 8.1, `JWT_SECRET_KEY` /
-  `JWT_ALGORITHM` / `JWT_EXPIRES_MINUTES`). Never committed to the repo, never
-  shipped to the client bundle. The backend must start and serve
-  recommendations even when the LLM provider key is absent.
+  provider — `GEMINI_API_KEY` — and the auth signing configuration —
+  `JWT_SECRET_KEY` / `JWT_ALGORITHM` / `JWT_EXPIRES_MINUTES`). Never
+  committed to the repo, never shipped to the client bundle. The backend
+  must start and serve recommendations even when the LLM provider key is
+  absent.
 
 **Current live deployment:**
 
@@ -808,31 +816,45 @@ in Section 10.
 - [ ] No hardcoded API keys anywhere in the client bundle or repo.
 - [ ] No placeholder content; no unhandled console/runtime errors.
 
+**Multi-user / isolation:**
+
+- [ ] A person can register a new account and log in.
+- [ ] An unauthenticated request to any library, taste-profile, or
+      recommendation endpoint is rejected.
+- [ ] Two independent accounts (A and B) can each add the *same* title to
+      their own library, with fully independent status/rating/review/
+      progress, both referencing the same shared media metadata (no
+      duplicate `media_item` row).
+- [ ] Account A cannot read or modify account B's library entry, series
+      progress, taste profile, or recommendation session — including by
+      directly addressing account B's resource IDs while authenticated as
+      account A.
+- [ ] Account A's and account B's taste profiles differ correctly based only
+      on each account's own library (e.g. differing favourite genres).
+- [ ] Marking a title `completed`/`dropped` in account A's library excludes
+      it from account A's future recommendations, but does **not** exclude
+      it from account B's.
+
 ---
 
 ## 17. Explicitly Out of Scope (v0)
 
 - Book page / percentage progress tracking.
 - Full taste-profile scoring for book recommendations.
-- **Full multi-user data isolation** — the library (Phase 8.2), taste
-  profile, and recommendation sessions (Phase 8.3) are all user-owned and
-  authenticated in the data model and API code (Section 6.1, Section 13).
-  What remains is Phase 8.4 (frontend login/token support) and actually
-  deploying the auth enforcement live — until then the product still
-  functions as one shared library/profile in production, since the current
-  frontend cannot send a token at all (plan.md).
 - Social features (sharing, following, messaging).
 - Streaming or hosting media content.
 - Open-ended (unbounded) conversational clarification.
 - A trained / from-scratch ML recommendation model.
 - Cross-session conversation history.
 
-**No longer out of scope, now shipped:** LLM-generated candidate lists and
-reason text — Gemini is now the primary source of both (Section 9.0), with
-every objective fact independently verified and every suggestion resolved
-against a real provider before it can be shown (Section 9.0.1/9.0.2). What
-remains true: the LLM never computes the deterministic `score` (Section 9.1)
-and never decides the single clarifying question's wording.
+**No longer out of scope:** LLM-generated candidate lists and reason text —
+Gemini is now the primary source of both (Section 9.0), with every objective
+fact independently verified and every suggestion resolved against a real
+provider before it can be shown (Section 9.0.1/9.0.2); the LLM still never
+computes the deterministic `score` (Section 9.1) and never decides the
+single clarifying question's wording. Multi-user accounts and per-account
+data isolation are likewise no longer out of scope — they are core to the
+product (§2, §6, §11, §13), not an optional extension.
 
 ---
 
