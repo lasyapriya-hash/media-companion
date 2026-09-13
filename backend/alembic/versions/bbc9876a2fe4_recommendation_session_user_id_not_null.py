@@ -22,16 +22,22 @@ before ever touching the column — rather than a bare Postgres
 constraint-violation error, and rather than silently discarding or
 reassigning those rows. `recommendation_session` has no natural "real owner"
 to backfill onto the way `library_entry` did in Phase 8.2 (there is no
-registered account a stale, ownerless debug session obviously belongs to) —
-if any such rows are found, the correct fix is a deliberate human decision
-(this table is documented, prunable debug data per spec §6.1/§8.4, so
-deleting the specific stale rows is one reasonable option) made outside this
-migration, not something this migration assumes or automates.
+registered account a stale, ownerless debug session obviously belongs to).
+
+This pre-check first ran against production and found 48 such legacy rows —
+pre-Phase-8.1 sessions created before the `user` table existed at all. The
+deliberate human decision that failure demanded was: delete those specific
+stale, prunable-by-design rows (spec §6.1/§8.4 explicitly permits pruning
+this table "freely regardless of age"), which is now its own preceding
+migration (`3c1cd7a08822`) rather than something this migration does itself.
+This migration's pre-check is unchanged and stays in place as the ongoing
+safety net — it will refuse to run again if any row ever ends up NULL for
+any other reason in the future.
 
 Safe on a fresh/empty database: zero rows trivially satisfy the pre-check.
 
 Revision ID: bbc9876a2fe4
-Revises: bee1a3183184
+Revises: 3c1cd7a08822
 Create Date: 2026-09-13 18:48:13.050398
 """
 from typing import Sequence, Union
@@ -41,7 +47,7 @@ import sqlalchemy as sa
 
 
 revision: str = 'bbc9876a2fe4'
-down_revision: Union[str, None] = 'bee1a3183184'
+down_revision: Union[str, None] = '3c1cd7a08822'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
