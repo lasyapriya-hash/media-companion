@@ -31,10 +31,14 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 let fetchMock: ReturnType<typeof vi.fn>;
 
+let confirmMock: ReturnType<typeof vi.fn>;
+
 beforeEach(() => {
+  confirmMock = vi.fn();
   vi.stubGlobal("window", {
     localStorage: makeMemoryStorage(),
     location: { pathname: "/login", assign: vi.fn() },
+    confirm: confirmMock,
   });
   fetchMock = vi.fn();
   vi.stubGlobal("fetch", fetchMock);
@@ -119,28 +123,34 @@ describe("submitRegister", () => {
 });
 
 describe("performLogout", () => {
-  it("clears the stored token", () => {
+  it("clears the stored token when confirmed", () => {
     setToken("some-token");
 
-    performLogout(vi.fn());
+    performLogout(vi.fn(), () => true);
 
     expect(getToken()).toBeNull();
   });
 
-  it("navigates to /login", () => {
+  it("navigates to /login when confirmed", () => {
     setToken("some-token");
     const navigate = vi.fn();
 
-    performLogout(navigate);
+    performLogout(navigate, () => true);
 
     expect(navigate).toHaveBeenCalledWith("/login");
     expect(navigate).toHaveBeenCalledTimes(1);
   });
 
+  it("returns true when confirmed", () => {
+    setToken("some-token");
+
+    expect(performLogout(vi.fn(), () => true)).toBe(true);
+  });
+
   it("clears the token and navigates even when there was no token to begin with", () => {
     const navigate = vi.fn();
 
-    expect(() => performLogout(navigate)).not.toThrow();
+    expect(() => performLogout(navigate, () => true)).not.toThrow();
 
     expect(getToken()).toBeNull();
     expect(navigate).toHaveBeenCalledWith("/login");
@@ -149,8 +159,46 @@ describe("performLogout", () => {
   it("makes no network call — logout is purely client-side (stateless JWTs)", () => {
     setToken("some-token");
 
-    performLogout(vi.fn());
+    performLogout(vi.fn(), () => true);
 
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does nothing and returns false when the user cancels the confirmation", () => {
+    setToken("some-token");
+    const navigate = vi.fn();
+
+    const result = performLogout(navigate, () => false);
+
+    expect(result).toBe(false);
+    expect(getToken()).toBe("some-token");
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("defaults to a real window.confirm prompt with the expected message", () => {
+    setToken("some-token");
+    const navigate = vi.fn();
+    confirmMock.mockReturnValueOnce(true);
+
+    const result = performLogout(navigate);
+
+    expect(confirmMock).toHaveBeenCalledWith(
+      "Are you sure you want to log out?",
+    );
+    expect(result).toBe(true);
+    expect(getToken()).toBeNull();
+    expect(navigate).toHaveBeenCalledWith("/login");
+  });
+
+  it("via the default window.confirm: cancelling keeps the user logged in", () => {
+    setToken("some-token");
+    const navigate = vi.fn();
+    confirmMock.mockReturnValueOnce(false);
+
+    const result = performLogout(navigate);
+
+    expect(result).toBe(false);
+    expect(getToken()).toBe("some-token");
+    expect(navigate).not.toHaveBeenCalled();
   });
 });

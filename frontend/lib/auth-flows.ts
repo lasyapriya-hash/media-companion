@@ -51,16 +51,28 @@ export async function submitRegister(
 }
 
 /**
- * Log out (Phase 8.4D): clear the stored token and send the browser to
- * /login. No backend call — JWTs are stateless in this design, so there is
- * no server-side session to invalidate (spec: auth foundation, Phase 8.1).
+ * Log out: ask for confirmation, then — only if confirmed — clear the
+ * stored token and send the browser to /login. No backend call — JWTs are
+ * stateless in this design, so there is no server-side session to
+ * invalidate (spec: auth foundation, Phase 8.1). Returns whether the logout
+ * actually happened, so the caller (`lib/auth-context.tsx`) can leave its
+ * `isAuthenticated` state untouched when the user cancels.
  *
- * Takes `navigate` as a parameter rather than importing `next/navigation`
- * itself, for the same reason `submitLogin`/`submitRegister` don't
- * navigate: this is a plain module with no router of its own. The caller
- * (`lib/auth-context.tsx`) passes its `router.push`.
+ * Takes `navigate` and `confirmLogout` as parameters rather than importing
+ * `next/navigation` or reaching for `window.confirm` directly, for the same
+ * reason `submitLogin`/`submitRegister` don't navigate themselves: this is a
+ * plain module with no browser globals of its own, which keeps it
+ * unit-testable without rendering anything. The caller passes its
+ * `router.push`; `confirmLogout` defaults to a real `window.confirm` prompt
+ * and is only ever overridden in tests.
  */
-export function performLogout(navigate: (path: string) => void): void {
+export function performLogout(
+  navigate: (path: string) => void,
+  confirmLogout: () => boolean = () =>
+    window.confirm("Are you sure you want to log out?"),
+): boolean {
+  if (!confirmLogout()) return false;
   clearToken();
   navigate("/login");
+  return true;
 }

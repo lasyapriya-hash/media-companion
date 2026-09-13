@@ -14,8 +14,10 @@
 // this, SiteNav would have no way to find out a login/logout just
 // happened in the same tab. `refresh()`/`logout()` below are the explicit,
 // deterministic triggers instead — login calls `refresh()` right after
-// storing the token, and `logout()` clears it, both synchronously updating
-// this shared state before anything navigates.
+// storing the token, and `logout()` clears it (once the user confirms —
+// see `performLogout`), synchronously updating this shared state before
+// anything navigates. Cancelling the confirmation leaves this state, and
+// the stored token, untouched.
 
 import { useRouter } from "next/navigation";
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
@@ -34,7 +36,8 @@ interface AuthContextValue {
    * right after a successful login, so every subscriber picks up the
    * change immediately rather than waiting for some other trigger. */
   refresh: () => void;
-  /** Clear the token and navigate to /login. */
+  /** Ask for confirmation, then — only if confirmed — clear the token and
+   * navigate to /login. A cancelled confirmation leaves the session as-is. */
   logout: () => void;
 }
 
@@ -57,8 +60,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [refresh]);
 
   const logout = useCallback(() => {
-    performLogout(router.push);
-    setIsAuthenticated(false);
+    // Only flip to unauthenticated if the user actually confirmed — a
+    // cancelled prompt must leave the session untouched (performLogout
+    // returns false without clearing the token or navigating in that case).
+    if (performLogout(router.push)) {
+      setIsAuthenticated(false);
+    }
   }, [router]);
 
   return (
